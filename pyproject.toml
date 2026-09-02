@@ -1,0 +1,10 @@
+[project]
+name = "dante-ai-factory-foundation"
+version = "0.1.0"
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+requires-python = ">=3.12"
+dependencies = ["pydantic==2.13.4", "PyYAML==6.0.3", "httpx==0.28.1", "ddgs==9.14.4"]
+
+[tool.unittest]
+start-directory = "tests"

@@ -1,0 +1,240 @@
+{
+  "private_baseline": "8ce432ba57b55ffb3bb41fe3afb8b4ad125986e4",
+  "files": [
+    {
+      "file": "dante/__init__.py",
+      "sha256": "4bceec5cd0cc9338d99c529cefa8de065b2db5983a18d680e9e09b7d2743eff3",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/__main__.py",
+      "sha256": "d423419fcad01e56e20ead95b8ec334776262e9438e15df3912ba36be0411ce4",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/acceptance.py",
+      "sha256": "af1bb0fafca84cc0034a26100a45d1db848ac9886377610c2923c3f0d1acc326",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/agent_host.py",
+      "sha256": "d961ced558225483726a7aca157663c262a1712b64068c280cc331d3648883e8",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/approvals.py",
+      "sha256": "4037445ce3e85e6ad02ddee6a2a13952f469b2492e4778d2cd8e57a4b9cf032a",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/artifacts.py",
+      "sha256": "9322d11727b33df95cf8a5d6ff1d4fcbec63d02948823c51930001227a944fa6",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/cli.py",
+      "sha256": "a7e5bbf1d4245bc029480f6a45523230486871da46c773d6775db4ed1cd28eaa",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/config.py",
+      "sha256": "f823426b96e7259f0d02cc922f081b77129c4c6a38ed693e3a8a5d1ac43b19cf",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/continuity.py",
+      "sha256": "46cb3c10a10fae7c350dab30cd5a68754a25be1f31fcbf399403b65687a20efb",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/contracts/__init__.py",
+      "sha256": "0bd55f2ac34e33d7cfbf3f453eb8baee460dd681ff3daf52cef8bd1e94491def",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/contracts/continuity.py",
+      "sha256": "b9d09590cd16e7f9af2dae5e194b948108a2a4262cd8b0bbb32eaf11216dbfeb",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/contracts/inference.py",
+      "sha256": "6ba3cbf2164398072d87be536a6f34fcb9a5898cedc7316b117d2d3d3927da1b",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/contracts/runtime.py",
+      "sha256": "6272d9d4be5c9008674b717b3481b6b616abd593bea856c829db74d52b192163",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/contracts/tools.py",
+      "sha256": "867b32baa4f770b71f04d98787a1fee36148c0aaccd9b16f8eb8a56dea1b7c7f",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/evals.py",
+      "sha256": "6cbd9d3e037156e29d5180768ad7834857e31241f4cddd93e65ed49a03bb9691",
+      "origin": "qualified baseline; trailing blank line at EOF removed; AST unchanged",
+      "baseline_sha256": "d667774210d6dc63232fb941b5d3064e957c416e8a2c0925b5fd3db2e8173adb"
+    },
+    {
+      "file": "dante/inference.py",
+      "sha256": "781d618852f9ada047a61066b498ee1c50834ee8f11ad633cd89d0ef64b03d74",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/ledger.py",
+      "sha256": "871576681583ef19817f08eb455348de434ddb3256ca704c549edde22b6c7ebf",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/local_runtime.py",
+      "sha256": "8a55dc7ba97fb84a196090959ada675cb12e4704d7dc2fed69c2bf3a51ead83e",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/migrations.py",
+      "sha256": "f4baa2ba2d58ae903c2902e8fde691cc3c4be3d41ccec2435eb4215ed195c92d",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/privacy.py",
+      "sha256": "a2209c79248e7aa36dd203d7bfef0bd7c7a98a9bddffec209a5964a848c84026",
+      "origin": "qualified baseline; trailing blank line at EOF removed; AST unchanged",
+      "baseline_sha256": "6559b7ffb3998e14bcc2c7f3c3af26f50c95e99ec06c71590eca3be9374f228e"
+    },
+    {
+      "file": "dante/recovery.py",
+      "sha256": "bf097fd1175c7abb754e3ca77de1839e80ca7fcafc3f4c25ca99d07bcdb38081",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/registry.py",
+      "sha256": "6695561593f9ad6e6925b6a4d1ce62c70d14a950f629ab7934a97f860af60e89",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/routing.py",
+      "sha256": "ef0fdc742791ae12c7038f9956ef837d03a47b4ad48980484a288013967ea33f",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/task_queue.py",
+      "sha256": "4a82815437f0eda5985fc68839cceefda47c2c0987b7c76d913889e8d41f7dba",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/telemetry.py",
+      "sha256": "0f544ca4e13e605eb07c1d460c7b10b81542d00ea1c9269026e293c3ea4a3ac5",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/tool_broker.py",
+      "sha256": "d4ed85a62bf505c49821da64d91a0d8d2767a5ca2bdeb82d5cfd7db56bff91db",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "dante/worker.py",
+      "sha256": "162d5ef14f6ad209265d34ddd6593ce4221946e3969adae802bdaa1d8e8df75e",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "pyproject.toml",
+      "sha256": "9b377b75d41c6679d83760408d601f8551b2d40c2746f7e62df46372a8d62231",
+      "origin": "qualified baseline; owner-authorized Apache-2.0 metadata added; dependencies unchanged",
+      "baseline_sha256": "b79a30ef6a81cae8cf29ad512e6be13954d1e34132b198357345ba4b252b3199"
+    },
+    {
+      "file": "requirements-dante.in",
+      "sha256": "bff2b0a7ec320ed529f4820a4f93e220e3cf6b56a559afaaf3ae7595aaac7f0e",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "scripts/dante_e2e.py",
+      "sha256": "103396673c403aad3403a07f1f47250a80e32e5098a9b24315b270343044d644",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/__init__.py",
+      "sha256": "f93cfca20e716bdcfa1dc8ca3a6b1afdc990a25826bae58e6576717af4c2e26c",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/continuity_process.py",
+      "sha256": "496698779b5b606bce838dcde5bcc7a2c33aef100b5d35da5b5aa663a543bc54",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/recovery_process.py",
+      "sha256": "4866c72abb9cd0fb332dea7c7a9dd8cd838e82e2c232dfa890c0f42b6fed3390",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_acceptance.py",
+      "sha256": "9bbfcce2d0f9505659c4a328dd3e27e0a913aae2fb270c02f9da2d736487e844",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_continuity.py",
+      "sha256": "cc3cede122b288fb59aa98ba5aca7c430a0a0212cbf32109bf06390f9d836a31",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_contracts_config_trace.py",
+      "sha256": "5930eef515d5c76bff0feae935cc71858f8c3f8c7203255dd4112c0bf63ac66f",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_e2e_resume.py",
+      "sha256": "0e47fe4fd1d7e5055dcc2a025b5d798eae68bf4f3caac22b9f416c0acde49aaa",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_gateway_tools_artifacts_approval.py",
+      "sha256": "b5c55d5893f209641c4a9ee619dccf411bd198e5a432f2cd773314204bc8faa7",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_inference_contract.py",
+      "sha256": "4e262ab8106e420bd83631d5abd86d8fec891051f7665f8f59a97822c54c4293",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_ledger_privacy_router.py",
+      "sha256": "373f61d997a6865acc76fccc7425c6a779387f73e59d730102481a043c45a3ab",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_local_runtime.py",
+      "sha256": "b8932408220fe1db2ddaa13147e07a730a74692d3b523eb7a9179db8d131f64f",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_recovery.py",
+      "sha256": "e1edfe80d075ee0a3124f4e55d41216083374e9837e113f5641ffabfabb199e9",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_tool_enforcement.py",
+      "sha256": "bb739a77ebceb49a2a790f340aa1cbd4dfb5dc107fd781508ca93f9387169720",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/test_worker.py",
+      "sha256": "9ae87b08a8104bb2ad60c01a2d9b3464076fbc5e82480ec5729ae9ceb1d6c044",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tests/worker_process.py",
+      "sha256": "869a50036835c84ceda1671cc60dcfba5b8472a99b08046cf982aea65fbe561d",
+      "origin": "qualified baseline; unchanged"
+    },
+    {
+      "file": "tools/ai_cloud_workspace.py",
+      "sha256": "64204a0f67f3213ec4c868b458095a5c2db8d2824c3235a8bd775c11d9fca5db",
+      "origin": "qualified baseline; unchanged"
+    }
+  ],
+  "configuration": "New sanitized public example; not a deployment configuration",
+  "lock": "Public package/version snapshot from qualified dependency environment"
+}

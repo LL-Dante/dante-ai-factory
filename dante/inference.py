@@ -21,9 +21,10 @@ from dante.telemetry import JsonlAudit
 class InferenceError(RuntimeError):
     """Safe, typed failure; provider payloads must not be included."""
 
-    def __init__(self, message='', *, retry_after: float | None = None):
+    def __init__(self, message='', *, retry_after: float | None = None, retry_at: float | None = None):
         super().__init__(message)
         self.retry_after = retry_after if retry_after is not None and math.isfinite(retry_after) and retry_after >= 0 else None
+        self.retry_at = retry_at if retry_at is not None and math.isfinite(retry_at) and retry_at >= 0 else None
 
 
 class AdapterUnavailable(InferenceError):
@@ -81,6 +82,17 @@ def retry_after_seconds(value: str | None) -> float | None:
         except (ValueError, TypeError, OverflowError):
             return None
     return max(0, seconds) if math.isfinite(seconds) else None
+
+
+def reset_at_seconds(value: str | None) -> float | None:
+    """Normalize a provider reset timestamp without retaining provider headers."""
+    if value is None:
+        return None
+    try:
+        reset_at = float(value)
+    except (TypeError, ValueError):
+        return None
+    return reset_at if math.isfinite(reset_at) and reset_at >= 0 else None
 
 
 # Compatibility name; responses now carry typed messages, calls and usage.
@@ -144,8 +156,10 @@ class AICloudLiteLLMAdapter:
                     error_class = QuotaExhausted
             except (ValueError, AttributeError, TypeError, OSError):
                 pass
+            reset = exc.headers.get('RateLimit-Reset') or exc.headers.get('X-RateLimit-Reset')
             return error_class('Provider rate/quota unavailable',
-                               retry_after=retry_after_seconds(exc.headers.get('Retry-After')))
+                               retry_after=retry_after_seconds(exc.headers.get('Retry-After')),
+                               retry_at=reset_at_seconds(reset))
         if exc.code in {408, 504}:
             return InferenceTimeout('Provider timed out', retry_after=retry_after_seconds(exc.headers.get('Retry-After')))
         if exc.code in {401, 403}:

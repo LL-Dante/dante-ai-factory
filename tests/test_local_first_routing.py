@@ -90,7 +90,7 @@ class LocalFirstRoutingTests(unittest.TestCase):
         self.cloud.error = QuotaExhausted()
         outcome = self.infer(ExecutionPolicy.CLOUD_ONLY)
         self.assertEqual((outcome.disposition, outcome.reason),
-                         (Disposition.RETRY_LATER, 'routes_temporarily_unavailable'))
+                         (Disposition.RETRY_LATER, 'provider_quota_cooldown'))
         self.assertEqual(self.local.calls, [])
 
     def test_no_backend_available_is_deterministic(self):

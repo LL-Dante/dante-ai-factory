@@ -55,12 +55,16 @@ class ContinuityManager:
             row = db.execute('SELECT * FROM backend_observations WHERE backend_id=?', (backend_id,)).fetchone()
         return dict(row) if row else None
 
-    def observe(self, backend_id, state: State, *, cooldown_until=None, task=None):
+    def observe(self, backend_id, state: State, *, cooldown_until=None, reason=None, task=None):
         """Trusted health input; free-form reasons and response bodies are never stored."""
         state = State(state)
         now = self.clock()
         if cooldown_until is not None and not math.isfinite(cooldown_until):
             raise ValueError('Invalid cooldown')
+        reason = reason or state.value
+        if reason not in {'available', 'degraded', 'rate_limit', 'rate_limited', 'quota_exhausted',
+                          'unavailable', 'cooldown', 'unknown', 'timeout', 'invalid_response'}:
+            raise ValueError('Invalid backend reason')
         with closing(self.ledger._connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
             if task is not None:
@@ -69,7 +73,7 @@ class ContinuityManager:
             failures = 0 if state == State.AVAILABLE else (row['consecutive_failures'] if row else 0) + 1
             last_success = now if state == State.AVAILABLE else (row['last_success'] if row else None)
             db.execute('INSERT OR REPLACE INTO backend_observations VALUES(?,?,?,?,?,?,?)',
-                (backend_id, state.value, state.value, now, cooldown_until, failures, last_success))
+                (backend_id, state.value, reason, now, cooldown_until, failures, last_success))
 
     def _event(self, task, event, metadata):
         with closing(self.ledger._connect()) as db, db:
@@ -111,7 +115,7 @@ class ContinuityManager:
             now = self.clock()
             candidates, denied = self.router.continuity_candidates(privacy,
                 capabilities | ({'tool_calling'} if tools else set()), self.policy, context_tokens=context_tokens)
-            usable, retry_dates = [], []
+            usable, retry_dates, cooldown_reasons = [], [], []
             for model in candidates:
                 if model.model_id in excluded:
                     denied[model.model_id] = excluded[model.model_id]
@@ -130,6 +134,7 @@ class ContinuityManager:
                 elif observation['cooldown_until'] is not None and observation['cooldown_until'] > now:
                     denied[model.model_id] = 'cooldown'
                     retry_dates.append(observation['cooldown_until'])
+                    cooldown_reasons.append(observation['reason'])
                 elif observation['cooldown_until'] is not None:
                     usable.append(model)  # Bounded probation after explicit cooldown.
                 elif (observation['state'] not in {State.AVAILABLE, State.DEGRADED}
@@ -141,7 +146,10 @@ class ContinuityManager:
             self._event(task, 'candidates', {'eligible': [m.model_id for m in usable], 'denied': denied})
             if not usable:
                 if retry_dates:
-                    return self._outcome(task, Disposition.RETRY_LATER, 'routes_temporarily_unavailable',
+                    reason = ('provider_quota_cooldown' if set(cooldown_reasons) == {'quota_exhausted'}
+                              else 'provider_rate_limit_cooldown' if set(cooldown_reasons) == {'rate_limit'}
+                              else 'routes_temporarily_unavailable')
+                    return self._outcome(task, Disposition.RETRY_LATER, reason,
                                          retry_at=max(now + self.policy.base_backoff_s, min(retry_dates)))
                 return self._outcome(task, Disposition.TERMINAL, 'no_eligible_route')
             retry_at = self._reserve(task)
@@ -166,7 +174,11 @@ class ContinuityManager:
                     failures = observation['consecutive_failures'] if observation else 0
                     delay = min(self.policy.max_backoff_s, self.policy.base_backoff_s * 2 ** min(failures, 30))
                     delay = max(delay, exc.retry_after or 0)
-                    self.observe(selected.provider_id, state, cooldown_until=self.clock() + delay, task=task)
+                    cooldown_until = self.clock() + delay
+                    if exc.retry_at is not None:
+                        cooldown_until = max(cooldown_until, exc.retry_at)
+                    self.observe(selected.provider_id, state, cooldown_until=cooldown_until,
+                                 reason=reason, task=task)
                 elif reason in {'invalid_request', 'unclassified_inference_error'}:
                     return self._outcome(task, Disposition.TERMINAL, reason)
                 else:

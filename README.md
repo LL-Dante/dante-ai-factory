@@ -35,7 +35,8 @@ Persistent task / acceptance -> SQLite ledger + worker queue
   an optional registry gate. The software layer is fixture-tested; physical Node 0
   and real local inference remain NOT YET QUALIFIED. See [Node 0 qualification](docs/node-qualification.md).
 - P8: explicit local/cloud execution preference connected to P7 qualification and
-  the existing persistent continuity path.
+  the existing persistent continuity path. Normalized quota/rate-limit state,
+  provider cooldown and available reset metadata survive process restart.
 
 Action success is not task success: required acceptance evidence must verify.
 An uncertain effect requires reconciliation; arbitrary effects are not promised
@@ -108,8 +109,8 @@ foundation 16, P1 17, P2 22, P3 24, P4 21, P5 33, P6 38. No test is removed or
 weakened. They include subprocess crash/restart and continuity tests and do not
 require external AI calls or model downloads. They do not qualify a real model.
 
-P7 adds 82 focused tests and P8 adds 6 routing-policy tests; the current
-implementation passed 259/259 offline tests.
+P7 adds 82 focused tests and P8 adds 11 routing/continuity tests; the current
+implementation passed 264/264 offline tests.
 See [P7 verification and hardware procedure](docs/node-qualification.md) for scope
 and limitations. No GPU, CUDA, runtime server or model weights are required.
 

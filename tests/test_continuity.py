@@ -237,11 +237,13 @@ class ContinuityTests(unittest.TestCase):
         import urllib.error
         from dante.inference import AICloudLiteLLMAdapter
         for code, expected in (('insufficient_quota', QuotaExhausted), ('rate_limit', RateLimitUnavailable)):
-            error = urllib.error.HTTPError('http://fixture',429,'',{'Retry-After':'90'},
+            error = urllib.error.HTTPError('http://fixture',429,'',
+                                          {'Retry-After':'90', 'X-RateLimit-Reset':'1234'},
                                           io.BytesIO(json.dumps({'error':{'code':code}}).encode()))
             mapped = AICloudLiteLLMAdapter._http_error(error)
             self.assertIsInstance(mapped,expected)
             self.assertEqual(mapped.retry_after,90)
+            self.assertEqual(mapped.retry_at,1234)
         outage = urllib.error.HTTPError('http://fixture',503,'',{'Retry-After':'75'},io.BytesIO(b'{}'))
         self.assertEqual(AICloudLiteLLMAdapter._http_error(outage).retry_after,75)
         invalid = urllib.error.HTTPError('http://fixture',400,'',{},io.BytesIO(b'{}'))

@@ -286,6 +286,8 @@ class InferenceGateway:
                 raise QualificationDenied('Local model qualification failed') from None
             try:
                 result = adapter.complete(request.model_copy(update={'model': model}))
+                if result.model != model:
+                    raise InvalidResponse('Inference adapter returned a mismatched model')
                 result = result.model_copy(update={'fallback': index > 0})
                 if self.audit:
                     self.audit.write('inference.completed', provider=model.provider_id, model=model.model_id,
@@ -301,7 +303,7 @@ class InferenceGateway:
         raise PolicyDenied('No eligible inference adapter')
 
     def infer_once(self, decision: RouteDecision, request: InferenceRequest) -> InferenceResponse:
-        """One selected route only; Continuity Manager owns reevaluation."""
+        """Execute one selected cloud or local route; Continuity Manager owns reevaluation."""
         if decision.candidates != (decision.selected_model.model_id,):
             raise ConfigurationDenied('Single-route decision required')
         return self.infer(decision, request)

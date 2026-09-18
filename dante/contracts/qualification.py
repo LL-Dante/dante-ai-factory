@@ -174,6 +174,8 @@ class QualificationState(StrEnum):
 
 class ModelQualification(EvidenceModel):
     qualification_id: UUID
+    attempt_id: UUID | None = None  # None identifies records written before the harness.
+    phase: Literal['intent', 'completed'] = 'completed'
     identity: QualificationIdentity
     source: Literal['synthetic', 'hardware']
     checks: tuple[CheckEvidence, ...] = ()
@@ -188,6 +190,8 @@ class ModelQualification(EvidenceModel):
             raise ValueError('Duplicate check evidence')
         if self.completed_at is not None and self.completed_at < self.started_at:
             raise ValueError('Completion precedes start')
+        if self.phase == 'intent' and (self.completed_at is not None or self.checks):
+            raise ValueError('Intent records cannot contain completed evidence')
         return self
 
 

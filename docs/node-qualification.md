@@ -142,11 +142,24 @@ different physical node. A malformed existing UUID file fails closed and is neve
 replaced automatically. Keep the UUID, database and evidence outside the repository.
 
 After a future trusted harness collects a complete current identity and evidence,
-use the Python runner/store APIs. An identity JSON can be assessed with:
+the same CLI flow can persist a qualification attempt:
 
 ```powershell
+& $py -m dante --db $db node-qualify --node-id-file $idFile `
+  --identity (Join-Path $state 'current-identity.json')
 & $py -m dante --db $db node-status --identity (Join-Path $state 'current-identity.json')
 ```
+
+The repository intentionally ships no real runtime probe. With the default
+observation-only probe, `node-qualify` records `intent` and `completed` lifecycle
+entries and returns `UNKNOWN`; every check remains `unknown` with no evidence digest.
+A future trusted Node 0 composition injects `QualificationProbeFactory` and a richer
+machine probe through `NodeQualificationHarness`. No module loading, runtime startup
+or executable discovery occurs from CLI arguments. Injected probes use the existing
+P7 `QualificationProbe` contract and must return bounded evidence for the exact
+observed identity. The result reports `UNKNOWN`, `QUALIFIED`, `FAILED` or `STALE`
+and includes safe reason codes. Process interruption leaves the durable intent so
+restart inspection cannot mistake an older pass for the interrupted attempt.
 
 `node-history` returns durable snapshots with runtimes/models/backend/configuration,
 timestamps and failed check reasons. Assess each against current observations to
@@ -172,10 +185,12 @@ without making a provider authoritative.
 ## Verification of this implementation
 
 On Windows with Python 3.12.13 and the existing declared environment, the full suite
-passed **213/213** tests: original P0–P6 **171**, P7 **42**, no skips.
+passed **224/224** tests: original P0–P6 **171**, P7 **53**, no skips.
 This is evidence for the reviewed working changes based on public commit
 `5de6869d8d4cfbf81a72b5df2eea31188d37ca23`, not qualification of physical Node 0.
 P7 coverage includes validation, multiple GPUs, selective invalidation, version
 changes, restart persistence, database migration, corrupt evidence, interrupted runs,
 synthetic/hardware separation, runtime discovery fixtures, gateway denial before HTTP,
 persistent bootstrap identity, concurrent initialization and explicit unqualified status.
+The qualification harness coverage adds durable attempt lifecycle, restart evidence,
+legacy-record compatibility, injected probe boundaries and all four verdict states.

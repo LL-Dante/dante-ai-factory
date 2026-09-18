@@ -5,6 +5,7 @@ No production runtime is probed or promoted automatically.
 """
 from collections.abc import Callable
 from contextlib import closing
+import json
 from typing import Protocol, Literal
 from uuid import UUID, uuid4
 
@@ -94,7 +95,7 @@ class QualificationStore:
         if row is None:
             raise KeyError('Qualification not found')
         record = ModelQualification.model_validate_json(row['payload'])
-        if (digest(record.model_dump(mode='json')) != row['payload_digest']
+        if (digest(json.loads(row['payload'])) != row['payload_digest']
                 or str(record.qualification_id) != row['qualification_id']
                 or str(record.identity.machine.node_id) != row['node_id']
                 or record.identity.scope != row['scope']):
@@ -149,9 +150,10 @@ class QualificationRunner:
     def run(self, probe: QualificationProbe) -> ModelQualification:
         identity = QualificationIdentity.model_validate_json(probe.observe().model_dump_json())
         started = utc_now()
+        attempt_id = uuid4()
         # Crash during a new qualification leaves UNKNOWN, never an old qualified result.
-        intent = ModelQualification(qualification_id=uuid4(), identity=identity,
-                                    source=probe.source, started_at=started)
+        intent = ModelQualification(qualification_id=uuid4(), attempt_id=attempt_id, phase='intent',
+                                    identity=identity, source=probe.source, started_at=started)
         self.store.append(intent)
         checks, interrupted, performance = [], False, PerformanceEvidence()
         try:
@@ -165,7 +167,8 @@ class QualificationRunner:
                 interrupted = True  # Identity changed while measurements were in flight.
         except Exception:
             interrupted = True  # Never persist arbitrary exception messages.
-        record = ModelQualification(qualification_id=uuid4(), identity=identity, source=intent.source,
+        record = ModelQualification(qualification_id=uuid4(), attempt_id=attempt_id, phase='completed',
+            identity=identity, source=intent.source,
             checks=tuple(checks), performance=performance, started_at=started,
             completed_at=utc_now(), interrupted=interrupted)
         self.store.append(record)

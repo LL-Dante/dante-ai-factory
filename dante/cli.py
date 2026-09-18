@@ -26,7 +26,7 @@ def offline_host(ledger, task):
     return AgentHostFoundation(ledger, None, None, None, broker)
 
 
-def main(argv=None):
+def main(argv=None, *, qualification_probe_factory=None, node_machine_probe=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', type=Path, required=True)
     sub = parser.add_subparsers(dest='command', required=True)
@@ -55,6 +55,9 @@ def main(argv=None):
     history.add_argument('--node-id', type=UUID, required=True)
     qualification = sub.add_parser('node-status', help='Assess evidence against a current identity JSON file')
     qualification.add_argument('--identity', type=Path, required=True)
+    qualify = sub.add_parser('node-qualify', help='Persist a qualification attempt; default probe remains unknown')
+    qualify.add_argument('--node-id-file', type=Path, required=True)
+    qualify.add_argument('--identity', type=Path, required=True)
     args = parser.parse_args(argv)
     ledger = TaskLedger(args.db)
     queue = TaskQueue(ledger)
@@ -72,6 +75,12 @@ def main(argv=None):
                           'reasons': ['hardware_evidence_missing', 'runtime_evidence_missing']}
             elif args.command == 'node-bootstrap':
                 result = bootstrap_node(store, args.node_id_file).model_dump(mode='json')
+            elif args.command == 'node-qualify':
+                from dante.node_qualification import NodeQualificationHarness
+                identity = QualificationIdentity.model_validate_json(args.identity.read_text(encoding='utf-8-sig'))
+                result = NodeQualificationHarness(store, args.node_id_file,
+                    machine_probe=node_machine_probe, probe_factory=qualification_probe_factory
+                    ).qualify(identity).model_dump(mode='json')
             elif args.command == 'node-history':
                 result = [record.model_dump(mode='json') for record in store.history(args.node_id)]
             else:

@@ -58,6 +58,14 @@ Ollama-specific evidence, and maps only opaque model aliases into `RuntimeObserv
 It does not start Ollama, scan ports, pull models, invoke inference or create
 qualification evidence.
 
+The llama.cpp probe uses an explicit `RuntimeProfile` endpoint (defaulting to
+`http://127.0.0.1:8080`). It requires the existing `/health` and `/v1/models`
+observations and reads `/props` only when the server provides it. Version and build
+remain unknown when absent. Backend is restricted to an explicitly reported or
+configured `cpu`, `cuda` or `vulkan` value; conflicting or unknown values fail closed,
+and no backend is ranked above another. The probe performs no model load, generation,
+benchmark or qualification.
+
 ## Lifecycle and evidence boundary
 
 | State | Meaning |
@@ -205,7 +213,7 @@ without making a provider authoritative.
 ## Verification of this implementation
 
 On Windows with Python 3.12.13 and the existing declared environment, the full suite
-passed **243/243** tests: original P0–P6 **171**, P7 **72**, no skips.
+passed **253/253** tests: original P0–P6 **171**, P7 **82**, no skips.
 This is evidence for the reviewed working changes based on public commit
 `5de6869d8d4cfbf81a72b5df2eea31188d37ca23`, not qualification of physical Node 0.
 P7 coverage includes validation, multiple GPUs, selective invalidation, version
@@ -220,3 +228,7 @@ command failure and CPU-only fallback.
 Ollama coverage uses HTTP fixtures for version and inventory discovery, explicit
 endpoint configuration, empty inventory, unavailable and timeout states, and malformed
 version, reference and digest responses. No test requires an Ollama installation.
+llama.cpp coverage uses HTTP fixtures for health, inventory, optional properties,
+version/build metadata, endpoint configuration, CPU/CUDA/Vulkan representation,
+backend conflicts, malformed responses, timeout and absence. No test requires a
+llama.cpp installation.

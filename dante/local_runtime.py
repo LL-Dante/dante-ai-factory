@@ -26,7 +26,7 @@ class LocalRuntimeAdapter:
         self.provider_id = provider_id or self.runtime
         self.machine_profile, self.transport = machine_profile, transport
 
-    def _json(self, path, body=None):
+    def _json(self, path, body=None, *, allow_not_found=False):
         try:
             with httpx.Client(transport=self.transport, trust_env=False, follow_redirects=False,
                               timeout=self.profile.timeout_s) as client:
@@ -37,6 +37,8 @@ class LocalRuntimeAdapter:
                         raw.extend(chunk)
                         if len(raw) > self.profile.max_response_bytes:
                             raise InvalidResponse('Runtime response exceeds limit')
+                    if response.status_code == 404 and allow_not_found:
+                        return None
                     if response.status_code != 200:
                         try:
                             self._error(response.status_code, bytes(raw), retry_after_seconds(response.headers.get('Retry-After')))
@@ -205,6 +207,10 @@ class OllamaAdapter(LocalRuntimeAdapter):
 class LlamaCppAdapter(LocalRuntimeAdapter):
     runtime = 'llamacpp'
     default_url = 'http://127.0.0.1:8080'
+
+    def properties(self):
+        """Return optional server metadata without making `/props` mandatory."""
+        return self._json('/props', allow_not_found=True)
 
     def inventory(self):
         try:

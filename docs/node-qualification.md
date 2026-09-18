@@ -213,8 +213,8 @@ without making a provider authoritative.
 ## Verification of this implementation
 
 On Windows with Python 3.12.13 and the existing declared environment, the full suite
-passed **280/280** tests: original P0–P6 **171**, P7 **82**, P8 **17**, hardening
-audits **10**, no skips.
+passed **284/284** tests: original P0–P6 **171**, P7 **82**, P8 **17**, hardening
+audits **14**, no skips.
 This is evidence for the reviewed working changes based on public commit
 `5de6869d8d4cfbf81a72b5df2eea31188d37ca23`, not qualification of physical Node 0.
 P7 coverage includes validation, multiple GPUs, selective invalidation, version

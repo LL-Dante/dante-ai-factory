@@ -94,19 +94,29 @@ class NvidiaProbeTests(unittest.TestCase):
                 self.assertTrue(result.tool_available)
                 self.assertIsNone(result.gpus)
 
+    def test_nonzero_stderr_only_output_preserves_detected_tool(self):
+        result = discover_nvidia(Runner([CommandOutput(9, '', 'driver not loaded')]))
+        self.assertTrue(result.tool_available)
+        self.assertIsNone(result.gpus)
+
     def test_oversized_output_is_unknown(self):
         result = discover_nvidia(Runner([CommandOutput(0, 'x' * (256 * 1024 + 1))]))
         self.assertTrue(result.tool_available)
         self.assertIsNone(result.gpus)
 
-    def test_command_errors_are_clean_absence(self):
-        for error in (OSError('missing'), subprocess.TimeoutExpired('nvidia-smi', 5)):
-            def fail(_arguments, error=error):
-                raise error
-            with self.subTest(error=type(error).__name__):
-                result = discover_nvidia(fail)
-                self.assertFalse(result.tool_available)
-                self.assertIsNone(result.gpus)
+    def test_missing_command_is_clean_absence(self):
+        def fail(_arguments):
+            raise OSError('missing')
+        result = discover_nvidia(fail)
+        self.assertFalse(result.tool_available)
+        self.assertIsNone(result.gpus)
+
+    def test_command_timeout_preserves_detected_tool(self):
+        def fail(_arguments):
+            raise subprocess.TimeoutExpired('nvidia-smi', 5)
+        result = discover_nvidia(fail)
+        self.assertTrue(result.tool_available)
+        self.assertIsNone(result.gpus)
 
     def test_machine_profile_receives_observed_nvidia_fields(self):
         observation = NvidiaObservation(tool_available=True, gpus=discover_nvidia(Runner([

@@ -112,7 +112,7 @@ weakened. They include subprocess crash/restart and continuity tests and do not
 require external AI calls or model downloads. They do not qualify a real model.
 
 P7 adds 82 focused tests, P8 adds 17 routing/continuity/bridge tests and the
-hardening audits add 10 regressions; the current implementation passed 280/280
+hardening audits add 14 regressions; the current implementation passed 284/284
 offline tests.
 See [P7 verification and hardware procedure](docs/node-qualification.md) for scope
 and limitations. No GPU, CUDA, runtime server or model weights are required.

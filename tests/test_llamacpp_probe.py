@@ -84,12 +84,21 @@ class LlamaCppProbeTests(unittest.TestCase):
 
     def test_malformed_model_and_properties_are_errors(self):
         fixtures = (LlamaCppWire(models=[{'id': 'bad\nreference'}]),
+                    LlamaCppWire(models=[{'id': 'valid.gguf'}, {}]),
                     LlamaCppWire(properties=[]),
                     LlamaCppWire(properties={'backend': 'metal'}),
                     LlamaCppWire(properties={'version': {'bad': True}}))
         for wire in fixtures:
             with self.subTest(paths=wire.paths):
                 result = self.probe(wire)
+                self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
+
+    def test_empty_or_malformed_json_is_error(self):
+        for content in (b'', b'{bad json'):
+            with self.subTest(content=content):
+                transport = httpx.MockTransport(
+                    lambda _request, content=content: httpx.Response(200, content=content))
+                result = probe_llamacpp(transport=transport)
                 self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
 
     def test_configured_and_reported_backend_must_match(self):

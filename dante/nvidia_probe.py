@@ -125,5 +125,7 @@ def discover_nvidia(runner: CommandRunner | None = None) -> NvidiaObservation:
                          for profile in gpus)
         cuda = _cuda_driver_api(runner(tuple()))
         return NvidiaObservation(tool_available=True, gpus=enriched, cuda_driver_api=cuda)
+    except subprocess.TimeoutExpired:
+        return NvidiaObservation(tool_available=True)
     except (OSError, subprocess.SubprocessError, csv.Error, ValueError, TypeError, AttributeError):
         return NvidiaObservation(tool_available=False)

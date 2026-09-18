@@ -76,12 +76,26 @@ class OllamaProbeTests(unittest.TestCase):
         self.assertEqual((result.state, result.failure), ('error', 'capacity_unavailable'))
 
     def test_malformed_version_is_error(self):
-        result = self.probe(OllamaWire(version=''))
-        self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
+        for version in ('', '0.12/unsupported'):
+            with self.subTest(version=version):
+                result = self.probe(OllamaWire(version=version))
+                self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
+
+    def test_empty_or_malformed_json_is_error(self):
+        for content in (b'', b'{bad json'):
+            with self.subTest(content=content):
+                transport = httpx.MockTransport(
+                    lambda _request, content=content: httpx.Response(200, content=content))
+                result = probe_ollama(transport=transport)
+                self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
 
     def test_malformed_inventory_is_error(self):
-        result = self.probe(OllamaWire(models=[{'name': 'bad\nreference'}]))
-        self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
+        inventories = ([{'name': 'bad\nreference'}],
+                       [{'name': 'valid:1'}, {'digest': PIN}])
+        for models in inventories:
+            with self.subTest(models=models):
+                result = self.probe(OllamaWire(models=models))
+                self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
 
     def test_invalid_digest_is_error(self):
         result = self.probe(OllamaWire(models=[{'name': 'model:1', 'digest': 'not-a-digest'}]))

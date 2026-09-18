@@ -120,6 +120,15 @@ class OllamaAdapter(LocalRuntimeAdapter):
     runtime = 'ollama'
     default_url = 'http://127.0.0.1:11434'
 
+    def version(self):
+        try:
+            version = self._json('/api/version')['version']
+            if not isinstance(version, str) or not version.strip():
+                raise ValueError('Expected version string')
+            return version.strip()
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise InvalidResponse('Invalid Ollama version response') from None
+
     def inventory(self):
         try:
             models = self._json('/api/tags')['models']

@@ -50,6 +50,14 @@ the driver's advertised CUDA API compatibility, not proof of an installed CUDA
 runtime or toolkit. `cuda_toolkit` remains null. The probe performs no benchmark,
 model execution, runtime qualification or backend preference.
 
+The Ollama probe uses an explicit `RuntimeProfile` endpoint (defaulting to the
+loopback origin `http://127.0.0.1:11434`) and the existing bounded HTTP adapter. It
+requests only `/api/version` and `/api/tags`. The result distinguishes available,
+unavailable and invalid/error states, retains observed model references in the
+Ollama-specific evidence, and maps only opaque model aliases into `RuntimeObservation`.
+It does not start Ollama, scan ports, pull models, invoke inference or create
+qualification evidence.
+
 ## Lifecycle and evidence boundary
 
 | State | Meaning |
@@ -197,7 +205,7 @@ without making a provider authoritative.
 ## Verification of this implementation
 
 On Windows with Python 3.12.13 and the existing declared environment, the full suite
-passed **234/234** tests: original P0–P6 **171**, P7 **63**, no skips.
+passed **243/243** tests: original P0–P6 **171**, P7 **72**, no skips.
 This is evidence for the reviewed working changes based on public commit
 `5de6869d8d4cfbf81a72b5df2eea31188d37ca23`, not qualification of physical Node 0.
 P7 coverage includes validation, multiple GPUs, selective invalidation, version
@@ -209,3 +217,6 @@ legacy-record compatibility, injected probe boundaries and all four verdict stat
 NVIDIA coverage uses command fixtures for multiple GPUs, VRAM conversion, driver and
 compute data, the shell-free process boundary, bounded malformed output, missing tools,
 command failure and CPU-only fallback.
+Ollama coverage uses HTTP fixtures for version and inventory discovery, explicit
+endpoint configuration, empty inventory, unavailable and timeout states, and malformed
+version, reference and digest responses. No test requires an Ollama installation.

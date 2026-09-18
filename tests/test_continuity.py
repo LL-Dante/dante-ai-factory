@@ -153,6 +153,13 @@ class ContinuityTests(unittest.TestCase):
         self.cloud.error = None
         self.assertEqual(self.infer().disposition, Disposition.CONTINUE_NOW)
 
+    def test_success_resets_route_attempt_budget(self):
+        self.manager.policy = ContinuityPolicy(
+            mode='CLOUD_FIRST_WITH_LOCAL_FALLBACK', max_route_attempts=1)
+        for _ in range(3):
+            self.assertEqual(self.infer().disposition, Disposition.CONTINUE_NOW)
+        self.assertEqual(len(self.cloud.calls), 3)
+
     def test_success_restores_backend(self):
         self.fallback(InferenceTimeout())
         self.now += 6

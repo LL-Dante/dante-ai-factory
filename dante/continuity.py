@@ -102,6 +102,9 @@ class ContinuityManager:
             db.execute('INSERT OR IGNORE INTO task_continuity(task_id,window_start) VALUES(?,?)', (task.task_id, self.clock()))
             db.execute('UPDATE task_continuity SET next_attempt_at=?,last_reason=?,disposition=? WHERE task_id=?',
                        (retry_at, reason, disposition.value, task.task_id))
+            if disposition == Disposition.CONTINUE_NOW:
+                db.execute('UPDATE task_continuity SET window_start=?,attempts=0 WHERE task_id=?',
+                           (self.clock(), task.task_id))
             self.ledger._event(db, task, 'continuity.outcome', task.status,
                               {'disposition': disposition.value, 'reason': reason, 'next_attempt_at': retry_at})
         return ContinuityOutcome(disposition, reason, response, retry_at)

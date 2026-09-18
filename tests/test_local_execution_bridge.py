@@ -124,6 +124,36 @@ class LocalExecutionBridgeTests(unittest.TestCase):
         self.assertEqual(raised.exception.outcome.reason, 'no_eligible_route')
         self.assertEqual(self.local.calls, [])
 
+    def test_all_nonqualified_states_fail_closed_and_qualified_executes(self):
+        for state in (QualificationState.UNKNOWN, QualificationState.FAILED,
+                      QualificationState.STALE):
+            with self.subTest(state=state):
+                self.gate.state = state
+                host, _ = self.host(ExecutionPolicy.LOCAL_ONLY)
+                with self.assertRaises(ContinuitySignal) as raised:
+                    host.infer(self.task.task_id, 'fixture', set())
+                self.assertEqual((raised.exception.outcome.disposition,
+                                  raised.exception.outcome.reason),
+                                 (Disposition.TERMINAL, 'no_eligible_route'))
+        self.assertEqual(self.local.calls, [])
+        self.gate.state = QualificationState.QUALIFIED
+        host, _ = self.host(ExecutionPolicy.LOCAL_ONLY)
+        self.assertEqual(host.infer(self.task.task_id, 'fixture', set()).provider_id,
+                         'fake-local')
+
+    def test_execution_policy_backend_selection_matrix(self):
+        expected = {
+            ExecutionPolicy.LOCAL_ONLY: 'fake-local',
+            ExecutionPolicy.LOCAL_PREFERRED: 'fake-local',
+            ExecutionPolicy.CLOUD_PREFERRED: 'fake-cloud',
+            ExecutionPolicy.CLOUD_ONLY: 'fake-cloud',
+        }
+        for mode, provider_id in expected.items():
+            with self.subTest(mode=mode):
+                host, _ = self.host(mode)
+                self.assertEqual(host.infer(self.task.task_id, 'fixture', set()).provider_id,
+                                 provider_id)
+
 
 if __name__ == '__main__':
     unittest.main()

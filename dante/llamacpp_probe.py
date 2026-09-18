@@ -79,6 +79,9 @@ def probe_llamacpp(profile: RuntimeProfile | None = None, *, transport=None,
         selected_backend = reported_backend or backend
         version = _label(properties.get('version'))
         build = _label(properties.get('build_info'))
+        references = [item['id'] for item in raw_inventory]
+        if len(references) != len(set(references)):
+            raise InvalidResponse('Duplicate llama.cpp model reference')
         models = tuple(sorted((LlamaCppModelObservation(runtime_reference=item['id'])
                                for item in raw_inventory), key=lambda model: model.runtime_reference))
         aliases = tuple('model-' + digest(model.runtime_reference)[:16] for model in models)
@@ -91,14 +94,14 @@ def probe_llamacpp(profile: RuntimeProfile | None = None, *, transport=None,
             server_state='ready', build=build, observation=observation, models=models)
     except InferenceTimeout:
         return _failure(profile, 'unavailable', 'timeout')
+    except RateQuotaUnavailable:
+        return _failure(profile, 'error', 'capacity_unavailable')
     except AdapterUnavailable:
         return _failure(profile, 'unavailable', 'unavailable')
     except InvalidResponse:
         return _failure(profile, 'error', 'invalid_response')
     except PolicyDenied:
         return _failure(profile, 'error', 'policy_denied')
-    except RateQuotaUnavailable:
-        return _failure(profile, 'error', 'capacity_unavailable')
     except InferenceError:
         return _failure(profile, 'error', 'runtime_error')
     except (KeyError, TypeError, ValueError, AttributeError):

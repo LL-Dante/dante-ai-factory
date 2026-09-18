@@ -102,6 +102,18 @@ class NodeBootstrapTests(unittest.TestCase):
         self.assertEqual(result['qualification_status'], 'NOT_YET_QUALIFIED')
         self.assertEqual(result['machine']['node_id'], str(NODE))
 
+    def test_cli_machine_probe_injection_applies_to_inspect_and_bootstrap(self):
+        database = self.root / 'injected.db'
+        commands = (
+            ['--db', str(database), 'node-inspect', '--node-id', str(NODE)],
+            ['--db', str(database), 'node-bootstrap', '--node-id-file', str(self.node_id_file)],
+        )
+        for arguments in commands:
+            with self.subTest(command=arguments[2]), patch('sys.stdout', new_callable=io.StringIO) as output:
+                self.assertEqual(main(arguments, node_machine_probe=fixture_profile), 0)
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['machine']['os'], 'FixtureOS')
+
 
 if __name__ == '__main__':
     unittest.main()

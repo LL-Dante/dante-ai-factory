@@ -4,6 +4,7 @@ import unittest
 import httpx
 
 from dante.contracts.runtime import RuntimeProfile
+from dante.inference import RateLimitUnavailable
 from dante.llamacpp_probe import probe_llamacpp
 
 
@@ -73,6 +74,10 @@ class LlamaCppProbeTests(unittest.TestCase):
                 self.assertEqual((result.state, result.failure), ('unavailable', failure))
                 self.assertIsNone(result.observation)
 
+    def test_capacity_failure_is_not_misclassified_as_transport_unavailable(self):
+        result = self.probe(LlamaCppWire(error=RateLimitUnavailable('fixture')))
+        self.assertEqual((result.state, result.failure), ('error', 'capacity_unavailable'))
+
     def test_not_ready_is_unavailable(self):
         result = self.probe(LlamaCppWire(health='loading model'))
         self.assertEqual((result.state, result.failure), ('unavailable', 'unavailable'))
@@ -89,6 +94,10 @@ class LlamaCppProbeTests(unittest.TestCase):
 
     def test_configured_and_reported_backend_must_match(self):
         result = self.probe(LlamaCppWire(properties={'backend': 'cuda'}), backend='vulkan')
+        self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
+
+    def test_duplicate_model_reference_is_invalid(self):
+        result = self.probe(LlamaCppWire(models=[{'id': 'duplicate.gguf'}, {'id': 'duplicate.gguf'}]))
         self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
 
     def test_profile_mismatch_rejected_before_transport(self):

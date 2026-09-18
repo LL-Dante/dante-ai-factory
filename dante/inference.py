@@ -288,6 +288,8 @@ class InferenceGateway:
                 result = adapter.complete(request.model_copy(update={'model': model}))
                 if result.model != model:
                     raise InvalidResponse('Inference adapter returned a mismatched model')
+                if result.cost is not None and result.cost != 0:
+                    raise PolicyDenied('Non-zero inference cost rejected')
                 result = result.model_copy(update={'fallback': index > 0})
                 if self.audit:
                     self.audit.write('inference.completed', provider=model.provider_id, model=model.model_id,

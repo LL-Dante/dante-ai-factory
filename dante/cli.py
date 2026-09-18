@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import signal
+import sqlite3
 from uuid import UUID
 
 from dante.agent_host import AgentHostFoundation
@@ -59,22 +60,23 @@ def main(argv=None, *, qualification_probe_factory=None, node_machine_probe=None
     qualify.add_argument('--node-id-file', type=Path, required=True)
     qualify.add_argument('--identity', type=Path, required=True)
     args = parser.parse_args(argv)
-    ledger = TaskLedger(args.db)
-    queue = TaskQueue(ledger)
     try:
+        ledger = TaskLedger(args.db)
+        queue = TaskQueue(ledger)
         if args.command.startswith('node-'):
             from dante.node_bootstrap import bootstrap_node, inspect_node
             from dante.qualification import QualificationStore
             from dante.contracts.qualification import QualificationIdentity
             store = QualificationStore(ledger)
             if args.command == 'node-inspect':
-                snapshot_id, machine = inspect_node(store, args.node_id)
+                snapshot_id, machine = inspect_node(store, args.node_id, node_machine_probe)
                 result = {'snapshot_id': snapshot_id, 'machine': machine.model_dump(mode='json'),
                           'qualification': 'unknown', 'qualification_state': 'unknown',
                           'qualification_status': 'NOT_YET_QUALIFIED',
                           'reasons': ['hardware_evidence_missing', 'runtime_evidence_missing']}
             elif args.command == 'node-bootstrap':
-                result = bootstrap_node(store, args.node_id_file).model_dump(mode='json')
+                result = bootstrap_node(store, args.node_id_file,
+                                        probe=node_machine_probe).model_dump(mode='json')
             elif args.command == 'node-qualify':
                 from dante.node_qualification import NodeQualificationHarness
                 identity = QualificationIdentity.model_validate_json(args.identity.read_text(encoding='utf-8-sig'))
@@ -118,7 +120,7 @@ def main(argv=None, *, qualification_probe_factory=None, node_machine_probe=None
             result = {'worker_id': instance.worker_id, 'stopped': True}
         print(json.dumps(result))
         return 0
-    except (ValueError, KeyError, RuntimeError, OSError):
+    except (ValueError, KeyError, RuntimeError, OSError, sqlite3.Error):
         # Do not echo submitted plans, tool arguments or exception messages.
         print(json.dumps({'error': 'local_command_failed'}))
         return 1

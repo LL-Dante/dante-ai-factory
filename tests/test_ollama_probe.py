@@ -4,6 +4,7 @@ import unittest
 import httpx
 
 from dante.contracts.runtime import RuntimeProfile
+from dante.inference import RateLimitUnavailable
 from dante.ollama_probe import probe_ollama
 
 
@@ -70,6 +71,10 @@ class OllamaProbeTests(unittest.TestCase):
         result = self.probe(OllamaWire(error=httpx.ReadTimeout('fixture')))
         self.assertEqual((result.state, result.failure), ('unavailable', 'timeout'))
 
+    def test_capacity_failure_is_not_misclassified_as_transport_unavailable(self):
+        result = self.probe(OllamaWire(error=RateLimitUnavailable('fixture')))
+        self.assertEqual((result.state, result.failure), ('error', 'capacity_unavailable'))
+
     def test_malformed_version_is_error(self):
         result = self.probe(OllamaWire(version=''))
         self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
@@ -80,6 +85,11 @@ class OllamaProbeTests(unittest.TestCase):
 
     def test_invalid_digest_is_error(self):
         result = self.probe(OllamaWire(models=[{'name': 'model:1', 'digest': 'not-a-digest'}]))
+        self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
+
+    def test_duplicate_model_reference_is_invalid(self):
+        model = {'name': 'duplicate:1', 'digest': PIN, 'details': {'format': 'gguf'}}
+        result = self.probe(OllamaWire(models=[model, model]))
         self.assertEqual((result.state, result.failure), ('error', 'invalid_response'))
 
     def test_profile_mismatch_is_rejected_before_transport(self):

@@ -60,6 +60,9 @@ def probe_ollama(profile: RuntimeProfile | None = None, *, transport=None,
     try:
         version = adapter.version()
         raw_inventory = adapter.inventory()
+        references = [item['id'] for item in raw_inventory]
+        if len(references) != len(set(references)):
+            raise InvalidResponse('Duplicate Ollama model reference')
         models = []
         for item in raw_inventory:
             details = item.get('details', {})
@@ -79,14 +82,14 @@ def probe_ollama(profile: RuntimeProfile | None = None, *, transport=None,
                                  observation=observation, models=models)
     except InferenceTimeout:
         return _failure(profile, 'unavailable', 'timeout')
+    except RateQuotaUnavailable:
+        return _failure(profile, 'error', 'capacity_unavailable')
     except AdapterUnavailable:
         return _failure(profile, 'unavailable', 'unavailable')
     except InvalidResponse:
         return _failure(profile, 'error', 'invalid_response')
     except PolicyDenied:
         return _failure(profile, 'error', 'policy_denied')
-    except RateQuotaUnavailable:
-        return _failure(profile, 'error', 'capacity_unavailable')
     except InferenceError:
         return _failure(profile, 'error', 'runtime_error')
     except (KeyError, TypeError, ValueError, AttributeError):

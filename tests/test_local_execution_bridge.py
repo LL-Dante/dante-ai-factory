@@ -37,6 +37,13 @@ class MismatchedAdapter(FakeAdapter):
             assistant_message=AssistantMessage(content='fixture'), finish_reason='stop')
 
 
+class NonZeroCostAdapter(FakeAdapter):
+    def complete(self, request):
+        self.calls.append(request)
+        return InferenceResponse(model=request.model,
+            assistant_message=AssistantMessage(content='fixture'), finish_reason='stop', cost=1)
+
+
 class LocalExecutionBridgeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -90,6 +97,15 @@ class LocalExecutionBridgeTests(unittest.TestCase):
         self.assertEqual((raised.exception.outcome.disposition, raised.exception.outcome.reason),
                          (Disposition.RETRY_LATER, 'routes_temporarily_unavailable'))
         self.assertEqual(manager.observation('fake-local')['reason'], 'invalid_response')
+
+    def test_gateway_rejects_nonzero_observed_cost_from_zero_cost_adapter(self):
+        adapter = NonZeroCostAdapter('fake-local')
+        host, _ = self.host(ExecutionPolicy.LOCAL_ONLY, adapters=[adapter])
+        with self.assertRaises(ContinuitySignal) as raised:
+            host.infer(self.task.task_id, 'fixture', set())
+        self.assertEqual((raised.exception.outcome.disposition, raised.exception.outcome.reason),
+                         (Disposition.TERMINAL, 'no_eligible_route'))
+        self.assertEqual(len(adapter.calls), 1)
 
     def test_no_adapter_has_deterministic_terminal_result(self):
         host, _ = self.host(ExecutionPolicy.LOCAL_ONLY, adapters=[])

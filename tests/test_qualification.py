@@ -348,8 +348,9 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(wire.calls, [])
 
     def test_probe_avoids_host_and_environment_collection(self):
+        from dante.nvidia_probe import NvidiaObservation
         with patch('dante.node_probe.platform.node', side_effect=AssertionError('must not read hostname')):
-            machine = probe_machine(NODE)
+            machine = probe_machine(NODE, nvidia_probe=lambda: NvidiaObservation(tool_available=False))
         self.assertEqual(machine.node_id, NODE)
         self.assertIsNone(machine.gpus)
         self.assertIsNone(machine.cuda_runtime)

@@ -7,6 +7,7 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 from dante.contracts.qualification import EvidenceModel, MachineProfile, RuntimeObservation
+from dante.nvidia_probe import NvidiaObservation, discover_nvidia
 
 
 def _label(value: str) -> str | None:
@@ -27,11 +28,14 @@ def _physical_memory() -> int | None:
     return status.physical if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)) else None
 
 
-def probe_machine(node_id: UUID) -> MachineProfile:
+def probe_machine(node_id: UUID, *,
+                  nvidia_probe: Callable[[], NvidiaObservation] | None = None) -> MachineProfile:
     """No hostname, username, serial numbers, paths, environment dumps or GPU guesses."""
+    nvidia = (nvidia_probe or discover_nvidia)()
     return MachineProfile(node_id=node_id, os=_label(platform.system()) or 'unknown',
         os_version=_label(platform.version()) or 'unknown', architecture=_label(platform.machine()) or 'unknown',
-        cpu=_label(platform.processor()), logical_cpus=os.cpu_count(), ram_bytes=_physical_memory())
+        cpu=_label(platform.processor()), logical_cpus=os.cpu_count(), ram_bytes=_physical_memory(),
+        gpus=nvidia.gpus, cuda_runtime=nvidia.cuda_driver_api)
 
 
 class RuntimeInventory(Protocol):

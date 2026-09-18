@@ -104,7 +104,7 @@ foundation 16, P1 17, P2 22, P3 24, P4 21, P5 33, P6 38. No test is removed or
 weakened. They include subprocess crash/restart and continuity tests and do not
 require external AI calls or model downloads. They do not qualify a real model.
 
-P7 adds 53 focused tests; the current implementation passed 224/224 offline tests.
+P7 adds 63 focused tests; the current implementation passed 234/234 offline tests.
 See [P7 verification and hardware procedure](docs/node-qualification.md) for scope
 and limitations. No GPU, CUDA, runtime server or model weights are required.
 
@@ -114,6 +114,9 @@ evidence exists. The exact local command is documented in the P7 guide.
 `node-qualify` persists an attempt and defaults to `UNKNOWN` because this repository
 does not ship a real hardware/runtime probe. Reviewed probes can be injected through
 the typed harness interface without making a runtime authoritative.
+Machine inspection can collect NVIDIA model, VRAM, driver and compute capability
+through bounded `nvidia-smi` queries. Tool absence is a supported unknown state;
+the probe does not benchmark or qualify CUDA, Vulkan, Ollama or llama.cpp.
 
 ## Third-party boundary and limitations
 

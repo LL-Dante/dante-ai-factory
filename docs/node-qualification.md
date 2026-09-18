@@ -15,8 +15,9 @@ installed model or model lifecycle approval is not a node qualification.
   GPU inventory supports multiple slots; an unprobed inventory is `null`, while an
   observed CPU-only machine uses an empty list. Hostnames, serials and usernames
   are not collected. The built-in probe collects only OS/version, architecture,
-  CPU/logical CPU information and Windows physical RAM. GPU, physical cores,
-  storage, drivers and CUDA observations await dedicated probes.
+  CPU/logical CPU information and Windows physical RAM. When `nvidia-smi` is on
+  PATH, the NVIDIA probe also records GPU index/model, VRAM, driver version and
+  compute capability where supported. Physical cores and storage await dedicated probes.
 - Existing `RuntimeProfile` remains transport configuration. `RuntimeObservation`
   records runtime identity/version/backend, configuration and optional binary
   digests, reported capabilities and sanitized inventory aliases.
@@ -37,6 +38,17 @@ when explicitly invoked; its tests inject HTTP fixtures. It discards raw invento
 metadata and exposes only caller-selected safe aliases. Versions and backend
 configuration must come from future runtime-specific observations, not guessed
 from an endpoint name.
+
+The NVIDIA inventory runs bounded local `nvidia-smi` commands without a shell. Its
+structured CSV queries collect `index`, `name`, `memory.total`, `driver_version` and,
+separately, `compute_cap`. Output is capped and malformed or incomplete base inventory
+fails to unknown. If the executable is absent or cannot run, `gpus` remains `null`;
+an explicit “no devices” response becomes an empty GPU list. Optional compute data
+can remain null without discarding valid base inventory. The default display's
+`CUDA Version` is recorded as `driver-supported-X.Y` in `cuda_runtime`: this is only
+the driver's advertised CUDA API compatibility, not proof of an installed CUDA
+runtime or toolkit. `cuda_toolkit` remains null. The probe performs no benchmark,
+model execution, runtime qualification or backend preference.
 
 ## Lifecycle and evidence boundary
 
@@ -185,7 +197,7 @@ without making a provider authoritative.
 ## Verification of this implementation
 
 On Windows with Python 3.12.13 and the existing declared environment, the full suite
-passed **224/224** tests: original P0–P6 **171**, P7 **53**, no skips.
+passed **234/234** tests: original P0–P6 **171**, P7 **63**, no skips.
 This is evidence for the reviewed working changes based on public commit
 `5de6869d8d4cfbf81a72b5df2eea31188d37ca23`, not qualification of physical Node 0.
 P7 coverage includes validation, multiple GPUs, selective invalidation, version
@@ -194,3 +206,6 @@ synthetic/hardware separation, runtime discovery fixtures, gateway denial before
 persistent bootstrap identity, concurrent initialization and explicit unqualified status.
 The qualification harness coverage adds durable attempt lifecycle, restart evidence,
 legacy-record compatibility, injected probe boundaries and all four verdict states.
+NVIDIA coverage uses command fixtures for multiple GPUs, VRAM conversion, driver and
+compute data, the shell-free process boundary, bounded malformed output, missing tools,
+command failure and CPU-only fallback.

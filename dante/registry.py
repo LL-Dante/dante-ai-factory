@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol
 
 import yaml
 
@@ -8,15 +9,23 @@ from dante.contracts import ModelRef, LifecycleState
 from dante.recovery import file_digest
 
 
+class LocalQualificationGate(Protocol):
+    def __call__(self, model: ModelRef, *, tool_use: bool = False) -> None: ...
+
+
 class ModelRegistry:
-    def __init__(self, models: list[ModelRef] | None = None, *, machine_profile: str = "default") -> None:
+    def __init__(self, models: list[ModelRef] | None = None, *, machine_profile: str = "default",
+                 qualification_gate: LocalQualificationGate | None = None) -> None:
         self.machine_profile = machine_profile
+        self.qualification_gate = qualification_gate
         self._models = {model.model_id: model for model in models or []}
 
     @classmethod
-    def from_yaml(cls, path: Path, *, machine_profile: str = "default") -> "ModelRegistry":
+    def from_yaml(cls, path: Path, *, machine_profile: str = "default",
+                  qualification_gate: LocalQualificationGate | None = None) -> "ModelRegistry":
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return cls([ModelRef.model_validate(item) for item in raw.get("models", [])], machine_profile=machine_profile)
+        return cls([ModelRef.model_validate(item) for item in raw.get("models", [])], machine_profile=machine_profile,
+                   qualification_gate=qualification_gate)
 
     def register(self, model: ModelRef) -> None:
         self._models[model.model_id] = model
@@ -42,6 +51,8 @@ class ModelRegistry:
                 or metadata.context_tokens is None or self.machine_profile not in metadata.machine_profiles
                 or (tool_use and (metadata.tool_use is not True or 'tool_calling' not in model.capabilities))):
             raise ValueError('Local model is not qualified for automatic use')
+        if self.qualification_gate is not None:
+            self.qualification_gate(model, tool_use=tool_use)
         self.verify_identity(model)
 
     @staticmethod

@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import signal
+from uuid import UUID
 
 from dante.agent_host import AgentHostFoundation
 from dante.contracts import Task, ToolManifest
@@ -46,11 +47,32 @@ def main(argv=None):
     worker.add_argument('--poll', type=float, default=1)
     worker.add_argument('--lease', type=float, default=30)
     worker.add_argument('--once', action='store_true', help='Process at most one task then exit')
+    inspect = sub.add_parser('node-inspect', help='Persist basic inventory; does not qualify hardware')
+    inspect.add_argument('--node-id', type=UUID, required=True)
+    history = sub.add_parser('node-history', help='List stored qualification evidence for a node')
+    history.add_argument('--node-id', type=UUID, required=True)
+    qualification = sub.add_parser('node-status', help='Assess evidence against a current identity JSON file')
+    qualification.add_argument('--identity', type=Path, required=True)
     args = parser.parse_args(argv)
     ledger = TaskLedger(args.db)
     queue = TaskQueue(ledger)
     try:
-        if args.command == 'submit':
+        if args.command.startswith('node-'):
+            from dante.node_probe import probe_machine
+            from dante.qualification import QualificationStore
+            from dante.contracts.qualification import QualificationIdentity
+            store = QualificationStore(ledger)
+            if args.command == 'node-inspect':
+                machine = probe_machine(args.node_id)
+                snapshot_id = store.record_machine(machine)
+                result = {'snapshot_id': snapshot_id, 'machine': machine.model_dump(mode='json'),
+                          'qualification': 'unknown'}
+            elif args.command == 'node-history':
+                result = [record.model_dump(mode='json') for record in store.history(args.node_id)]
+            else:
+                identity = QualificationIdentity.model_validate_json(args.identity.read_text(encoding='utf-8-sig'))
+                result = store.status(identity).model_dump(mode='json')
+        elif args.command == 'submit':
             from tools.ai_cloud_workspace import Tools
             task = Task(goal=args.goal, workspace=str(Tools()._root))
             plan = ExecutionPlan.model_validate_json(args.plan.read_text(encoding='utf-8-sig'))
@@ -82,7 +104,7 @@ def main(argv=None):
             result = {'worker_id': instance.worker_id, 'stopped': True}
         print(json.dumps(result))
         return 0
-    except (ValueError, KeyError, RuntimeError):
+    except (ValueError, KeyError, RuntimeError, OSError):
         # Do not echo submitted plans, tool arguments or exception messages.
         print(json.dumps({'error': 'local_command_failed'}))
         return 1

@@ -230,7 +230,7 @@ class ContinuityTests(unittest.TestCase):
         restored = TaskLedger(self.ledger.path)
         self.assertEqual(restored.get_task(self.task.task_id), self.task)
         with closing(restored._connect()) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],3)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],4)
 
     def test_http_error_classification_and_retry_after(self):
         import io

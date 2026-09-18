@@ -1,5 +1,10 @@
 # Public export qualification
 
+Historical report for initial public commit `5de6869d8d4cfbf81a72b5df2eea31188d37ca23`.
+The preparation-stage publication statements below describe that earlier checkpoint.
+The repository is now public and Private Vulnerability Reporting is enabled; see
+README.md and SECURITY.md. Later P7 evidence is in docs/node-qualification.md.
+
 The private baseline 8ce432ba57b55ffb3bb41fe3afb8b4ad125986e4 passed 171/171 tests
 and gates A-K. The independent public export does not have that commit hash or
 inherit its history. It independently passed 171/171 in a fresh Python 3.12.13

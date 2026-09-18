@@ -288,7 +288,7 @@ class ArtifactMigrationTests(unittest.TestCase):
             self.assertEqual(again.get_acceptance(task.task_id), AcceptanceContract())
             with closing(sqlite3.connect(path)) as db, db:
                 self.assertEqual(db.execute('SELECT revision FROM tasks').fetchone()[0], 7)
-                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
+                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
                 self.assertEqual(db.execute('SELECT count(*) FROM task_acceptance').fetchone()[0], 1)
 
 

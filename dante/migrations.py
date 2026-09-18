@@ -6,7 +6,7 @@ def migrate(connection: sqlite3.Connection) -> None:
     connection.execute('BEGIN IMMEDIATE')
     try:
         version = connection.execute('PRAGMA user_version').fetchone()[0]
-        if version > 3:
+        if version > 4:
             raise RuntimeError('Unsupported DANTE database schema')
         if version == 0:
             connection.execute('''CREATE TABLE task_acceptance (
@@ -52,6 +52,17 @@ def migrate(connection: sqlite3.Connection) -> None:
                 disposition TEXT
             )''')
             connection.execute('PRAGMA user_version=3')
+        if version < 4:
+            connection.execute('''CREATE TABLE IF NOT EXISTS node_profiles (
+                snapshot_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, payload TEXT NOT NULL
+            )''')
+            connection.execute('''CREATE TABLE IF NOT EXISTS model_qualifications (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                qualification_id TEXT NOT NULL UNIQUE, node_id TEXT NOT NULL,
+                scope TEXT NOT NULL, payload TEXT NOT NULL, payload_digest TEXT NOT NULL
+            )''')
+            connection.execute('CREATE INDEX IF NOT EXISTS qualification_scope ON model_qualifications(scope,sequence)')
+            connection.execute('PRAGMA user_version=4')
         connection.commit()
     except BaseException:
         connection.rollback()

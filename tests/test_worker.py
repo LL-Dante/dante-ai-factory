@@ -341,7 +341,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(migrated.get_task(historical.task_id), historical)
         self.assertEqual(migrated.events(historical.task_id)[0]['event'], 'task.created')
         with closing(sqlite3.connect(older)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
         self.assertEqual(TaskQueue(migrated).list(), [])
 
 

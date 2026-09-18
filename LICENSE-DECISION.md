@@ -31,6 +31,7 @@ legal originality guarantee.
 
 After safety gates pass, the owner authorizes a new independent local repository
 on main and one initial commit. No private Git storage/history may be imported.
-No remote or hosted repository is created. GitHub Private Vulnerability Reporting
-will be enabled when the official repository exists; no personal email is published.
-See SECURITY.md. Publication remains a separate action.
+That independent repository is now published as LL-Dante/dante-ai-factory.
+GitHub Private Vulnerability Reporting is enabled; no personal email is published.
+See SECURITY.md. SOURCE_MANIFEST.json records the initial export snapshot; subsequent
+original DANTE changes retain Apache-2.0 under the same ownership declaration.

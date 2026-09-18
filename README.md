@@ -1,4 +1,4 @@
-# DANTE AI Factory — sanitized distribution v1
+# DANTE AI Factory
 
 DANTE provides persistent, evidence-based task execution with typed inference,
 controlled tools and backend continuity. This is a separate source export, not a
@@ -31,6 +31,9 @@ Persistent task / acceptance -> SQLite ledger + worker queue
 - P4: persistent queue, leases, heartbeat, cancellation and process restart.
 - P5: qualified model registry and Ollama/llama.cpp adapter contracts.
 - P6: backend state, bounded retry/cooldown, route reevaluation and durable deferral.
+- P7: node qualification contracts, persistent evidence, identity invalidation and
+  an optional registry gate. The software layer is fixture-tested; physical Node 0
+  and real local inference remain NOT YET QUALIFIED. See [Node 0 qualification](docs/node-qualification.md).
 
 Action success is not task success: required acceptance evidence must verify.
 An uncertain effect requires reconciliation; arbitrary effects are not promised
@@ -101,6 +104,10 @@ foundation 16, P1 17, P2 22, P3 24, P4 21, P5 33, P6 38. No test is removed or
 weakened. They include subprocess crash/restart and continuity tests and do not
 require external AI calls or model downloads. They do not qualify a real model.
 
+P7 adds 34 focused tests; the current implementation passed 205/205 offline tests.
+See [P7 verification and hardware procedure](docs/node-qualification.md) for scope
+and limitations. No GPU, CUDA, runtime server or model weights are required.
+
 ## Third-party boundary and limitations
 
 DANTE does not import or require cptr/Open WebUI. The private stack's deployment,
@@ -117,9 +124,14 @@ gateway. No cptr source, binary, patch fragment, branding or asset is included.
 - Unknown usage/cost stays unknown. Gemini remains COST_UNVERIFIED and automatic
   continuity routing denies unverified cloud cost and paid routes.
 - Health or installed-model inventory does not establish model qualification.
-- No P7, RAG, Control API, Media Factory or workstation-specific tuning is included.
+- No real-hardware qualification harness, RAG, Control API, Media Factory or
+  workstation-specific tuning is included. P7 inventory alone grants no approval.
 
 See SECURITY.md, CONTRIBUTING.md and LICENSE-DECISION.md before redistribution.
-No public remote or hosted release is created by this export.
+The canonical public source is [LL-Dante/dante-ai-factory](https://github.com/LL-Dante/dante-ai-factory).
+SOURCE_MANIFEST.json and the export/provenance reports are historical evidence for
+the initial public export, not current-file integrity manifests after P7 changes.
 
-GitHub Private Vulnerability Reporting is the chosen security channel and will be enabled when the official repository exists; it is not active yet. Do not disclose vulnerabilities in public issues.
+GitHub Private Vulnerability Reporting is enabled. Use the
+[private reporting form](https://github.com/LL-Dante/dante-ai-factory/security/advisories/new).
+Do not disclose vulnerabilities in public issues.

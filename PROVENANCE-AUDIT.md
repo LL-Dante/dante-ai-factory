@@ -1,5 +1,9 @@
 # File-by-file provenance recheck
 
+Historical initial-export audit. Hashes and references to current files below apply
+to the initial public release, not subsequent P7 changes. SOURCE_MANIFEST.json is
+retained as that initial snapshot; Git diffs identify later original DANTE changes.
+
 Owner-confirmed decision: Apache-2.0. Status: PASS based on the declaration in
 LICENSE-DECISION.md and the traceability checks. This does not assert an independent
 chain-of-title certification or a stronger warranty than the owner's knowledge.

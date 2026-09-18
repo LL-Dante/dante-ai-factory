@@ -34,14 +34,18 @@ Persistent task / acceptance -> SQLite ledger + worker queue
 - P7: node qualification contracts, persistent evidence, identity invalidation and
   an optional registry gate. The software layer is fixture-tested; physical Node 0
   and real local inference remain NOT YET QUALIFIED. See [Node 0 qualification](docs/node-qualification.md).
+- P8: explicit local/cloud execution preference connected to P7 qualification and
+  the existing persistent continuity path.
 
 Action success is not task success: required acceptance evidence must verify.
 An uncertain effect requires reconciliation; arbitrary effects are not promised
 exactly-once semantics. Local-first is an explicit policy choice. Continuity is
 opt-in through DanteConfig.continuity and an injected ContinuityManager; supported
-policies include LOCAL_ONLY, LOCAL_FIRST, CLOUD_FIRST_WITH_LOCAL_FALLBACK and
-SPECIFIC_ALLOWED_BACKENDS. Health, qualification, privacy, capability, context,
-machine and cost gates still apply. Backend outage can defer the same task.
+policies are `LOCAL_ONLY`, `LOCAL_PREFERRED`, `CLOUD_PREFERRED` and `CLOUD_ONLY`.
+The P6 names `LOCAL_FIRST`, `CLOUD_FIRST_WITH_LOCAL_FALLBACK` and
+`SPECIFIC_ALLOWED_BACKENDS` remain accepted for compatibility. Health, P7
+qualification, privacy, capability, context, machine and cost gates still apply.
+Backend outage can defer the same task.
 
 ## Install from public files
 
@@ -104,7 +108,8 @@ foundation 16, P1 17, P2 22, P3 24, P4 21, P5 33, P6 38. No test is removed or
 weakened. They include subprocess crash/restart and continuity tests and do not
 require external AI calls or model downloads. They do not qualify a real model.
 
-P7 adds 82 focused tests; the current implementation passed 253/253 offline tests.
+P7 adds 82 focused tests and P8 adds 6 routing-policy tests; the current
+implementation passed 259/259 offline tests.
 See [P7 verification and hardware procedure](docs/node-qualification.md) for scope
 and limitations. No GPU, CUDA, runtime server or model weights are required.
 

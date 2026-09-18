@@ -1,6 +1,5 @@
 """Backend operation and continuation policy are independent of model qualification."""
 from enum import StrEnum
-from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -20,9 +19,20 @@ class ContinuityDisposition(StrEnum):
     TERMINAL='terminal'
 
 
+class ExecutionPolicy(StrEnum):
+    LOCAL_ONLY='LOCAL_ONLY'
+    LOCAL_PREFERRED='LOCAL_PREFERRED'
+    CLOUD_PREFERRED='CLOUD_PREFERRED'
+    CLOUD_ONLY='CLOUD_ONLY'
+    # Accepted for existing P6 configuration compatibility.
+    LOCAL_FIRST='LOCAL_FIRST'
+    CLOUD_FIRST_WITH_LOCAL_FALLBACK='CLOUD_FIRST_WITH_LOCAL_FALLBACK'
+    SPECIFIC_ALLOWED_BACKENDS='SPECIFIC_ALLOWED_BACKENDS'
+
+
 class ContinuityPolicy(BaseModel):
     model_config=ConfigDict(extra='forbid')
-    mode: Literal['LOCAL_ONLY','LOCAL_FIRST','CLOUD_FIRST_WITH_LOCAL_FALLBACK','SPECIFIC_ALLOWED_BACKENDS']='LOCAL_ONLY'
+    mode: ExecutionPolicy=ExecutionPolicy.LOCAL_ONLY
     allowed_backends: frozenset[str]=frozenset()
     base_backoff_s: float=Field(default=5,gt=0,allow_inf_nan=False)
     max_backoff_s: float=Field(default=300,gt=0,allow_inf_nan=False)

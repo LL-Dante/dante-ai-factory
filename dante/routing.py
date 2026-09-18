@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dante.contracts import CostClass, LifecycleState, RouteDecision, Task
+from dante.contracts.continuity import ExecutionPolicy
 from dante.privacy import PrivacyDecision
 from dante.registry import ModelRegistry
 
@@ -59,9 +60,10 @@ class RuleBasedRouter:
             if (not privacy.model_allowed or privacy.classification not in model.privacy_eligibility
                     or (not privacy.cloud_allowed and not model.local)):
                 reason = 'privacy'
-            elif ((policy.mode == 'LOCAL_ONLY' and not model.local)
+            elif ((policy.mode == ExecutionPolicy.LOCAL_ONLY and not model.local)
+                    or (policy.mode == ExecutionPolicy.CLOUD_ONLY and model.local)
                     or (policy.allowed_backends and model.provider_id not in policy.allowed_backends)
-                    or (policy.mode == 'SPECIFIC_ALLOWED_BACKENDS' and not policy.allowed_backends)):
+                    or (policy.mode == ExecutionPolicy.SPECIFIC_ALLOWED_BACKENDS and not policy.allowed_backends)):
                 reason = 'user_policy'
             elif (model.cost_class not in {CostClass.ZERO, CostClass.LOCAL_COMPUTE}
                     or (not model.local and (model.cost_class != CostClass.ZERO
@@ -86,6 +88,8 @@ class RuleBasedRouter:
                 denied[model.model_id] = reason
             else:
                 eligible.append(model)
-        cloud_first = policy.mode == 'CLOUD_FIRST_WITH_LOCAL_FALLBACK'
+        cloud_first = policy.mode in {
+            ExecutionPolicy.CLOUD_PREFERRED, ExecutionPolicy.CLOUD_FIRST_WITH_LOCAL_FALLBACK,
+        }
         eligible.sort(key=lambda m: (m.local if cloud_first else not m.local, m.logical_alias, m.model_id))
         return eligible, denied

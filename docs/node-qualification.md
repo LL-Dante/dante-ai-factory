@@ -122,23 +122,24 @@ qualification enforcement. The offline tool-worker CLI does not configure infere
 ## First procedure on Node 0
 
 First install the declared environment and run the offline regression from README.
-Then provision a random node identity once, keeping it in local operational storage:
+Then run the minimal bootstrap. It creates a random Node UUID once, reuses it on
+later runs, invokes the P7 machine inspection and stores each observed profile:
 
 ```powershell
 $py = '.\.venv\Scripts\python.exe'
 $state = Join-Path $env:LOCALAPPDATA 'DANTE-Node0'
 New-Item -ItemType Directory -Force $state | Out-Null
 $idFile = Join-Path $state 'node-id.txt'
-if (-not (Test-Path $idFile)) { [guid]::NewGuid().ToString() | Set-Content $idFile }
-$nodeId = (Get-Content $idFile -Raw).Trim()
 $db = Join-Path $state 'qualification.db'
-& $py -m dante --db $db node-inspect --node-id $nodeId
-& $py -m dante --db $db node-history --node-id $nodeId
+& $py -m dante --db $db node-bootstrap --node-id-file $idFile
 ```
 
-Expected initial qualification: `unknown`. `node-inspect` is an inventory command,
-not a hardware benchmark. Keep the UUID stable across restarts and assign a new one
-for a different physical node. Keep database and evidence outside the repository.
+Expected output includes `qualification_state: unknown` and
+`qualification_status: NOT_YET_QUALIFIED`, with missing hardware/runtime evidence
+listed as reasons. Bootstrap and `node-inspect` are inventory commands, not hardware
+benchmarks. Keep the UUID file stable across restarts and assign a new one for a
+different physical node. A malformed existing UUID file fails closed and is never
+replaced automatically. Keep the UUID, database and evidence outside the repository.
 
 After a future trusted harness collects a complete current identity and evidence,
 use the Python runner/store APIs. An identity JSON can be assessed with:
@@ -171,9 +172,10 @@ without making a provider authoritative.
 ## Verification of this implementation
 
 On Windows with Python 3.12.13 and the existing declared environment, the full suite
-passed **205/205** tests in 49.831 seconds: original P0–P6 **171**, P7 **34**, no skips.
+passed **213/213** tests: original P0–P6 **171**, P7 **42**, no skips.
 This is evidence for the reviewed working changes based on public commit
 `5de6869d8d4cfbf81a72b5df2eea31188d37ca23`, not qualification of physical Node 0.
 P7 coverage includes validation, multiple GPUs, selective invalidation, version
 changes, restart persistence, database migration, corrupt evidence, interrupted runs,
-synthetic/hardware separation, runtime discovery fixtures and gateway denial before HTTP.
+synthetic/hardware separation, runtime discovery fixtures, gateway denial before HTTP,
+persistent bootstrap identity, concurrent initialization and explicit unqualified status.

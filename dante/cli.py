@@ -49,6 +49,8 @@ def main(argv=None):
     worker.add_argument('--once', action='store_true', help='Process at most one task then exit')
     inspect = sub.add_parser('node-inspect', help='Persist basic inventory; does not qualify hardware')
     inspect.add_argument('--node-id', type=UUID, required=True)
+    bootstrap = sub.add_parser('node-bootstrap', help='Create/reuse a node UUID and inspect without qualifying hardware')
+    bootstrap.add_argument('--node-id-file', type=Path, required=True)
     history = sub.add_parser('node-history', help='List stored qualification evidence for a node')
     history.add_argument('--node-id', type=UUID, required=True)
     qualification = sub.add_parser('node-status', help='Assess evidence against a current identity JSON file')
@@ -58,15 +60,18 @@ def main(argv=None):
     queue = TaskQueue(ledger)
     try:
         if args.command.startswith('node-'):
-            from dante.node_probe import probe_machine
+            from dante.node_bootstrap import bootstrap_node, inspect_node
             from dante.qualification import QualificationStore
             from dante.contracts.qualification import QualificationIdentity
             store = QualificationStore(ledger)
             if args.command == 'node-inspect':
-                machine = probe_machine(args.node_id)
-                snapshot_id = store.record_machine(machine)
+                snapshot_id, machine = inspect_node(store, args.node_id)
                 result = {'snapshot_id': snapshot_id, 'machine': machine.model_dump(mode='json'),
-                          'qualification': 'unknown'}
+                          'qualification': 'unknown', 'qualification_state': 'unknown',
+                          'qualification_status': 'NOT_YET_QUALIFIED',
+                          'reasons': ['hardware_evidence_missing', 'runtime_evidence_missing']}
+            elif args.command == 'node-bootstrap':
+                result = bootstrap_node(store, args.node_id_file).model_dump(mode='json')
             elif args.command == 'node-history':
                 result = [record.model_dump(mode='json') for record in store.history(args.node_id)]
             else:

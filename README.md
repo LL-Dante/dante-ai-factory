@@ -104,9 +104,13 @@ foundation 16, P1 17, P2 22, P3 24, P4 21, P5 33, P6 38. No test is removed or
 weakened. They include subprocess crash/restart and continuity tests and do not
 require external AI calls or model downloads. They do not qualify a real model.
 
-P7 adds 34 focused tests; the current implementation passed 205/205 offline tests.
+P7 adds 42 focused tests; the current implementation passed 213/213 offline tests.
 See [P7 verification and hardware procedure](docs/node-qualification.md) for scope
 and limitations. No GPU, CUDA, runtime server or model weights are required.
+
+The Node 0 bootstrap creates or reuses a persistent UUID, records a conservative
+machine profile and reports `NOT_YET_QUALIFIED` until real hardware and runtime
+evidence exists. The exact local command is documented in the P7 guide.
 
 ## Third-party boundary and limitations
 

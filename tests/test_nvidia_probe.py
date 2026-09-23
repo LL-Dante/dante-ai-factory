@@ -136,6 +136,13 @@ class NvidiaProbeTests(unittest.TestCase):
         self.assertIsNone(machine.cuda_runtime)
         self.assertIsNone(machine.cuda_toolkit)
 
+    def test_machine_cpu_uses_windows_registry_fallback_when_platform_is_blank(self):
+        with patch('dante.node_probe.platform.processor', return_value=''), \
+             patch('dante.node_probe._windows_cpu_name', return_value='AMD Ryzen 9 9900X 12-Core Processor'):
+            machine = probe_machine(NODE,
+                nvidia_probe=lambda: NvidiaObservation(tool_available=False))
+        self.assertEqual(machine.cpu, 'AMD Ryzen 9 9900X 12-Core Processor')
+
 
 if __name__ == '__main__':
     unittest.main()

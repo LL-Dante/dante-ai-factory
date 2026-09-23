@@ -28,6 +28,20 @@ def _physical_memory() -> int | None:
     return status.physical if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)) else None
 
 
+def _windows_cpu_name() -> str | None:
+    """Read the OS-reported processor name when platform.processor() is blank."""
+    if os.name != 'nt':
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                r'HARDWARE\DESCRIPTION\System\CentralProcessor\0') as key:
+            value, _ = winreg.QueryValueEx(key, 'ProcessorNameString')
+        return value if isinstance(value, str) else None
+    except (OSError, ImportError):
+        return None
+
+
 def probe_machine(node_id: UUID, *,
                   nvidia_probe: Callable[[], NvidiaObservation] | None = None,
                   uuid_probe: Callable[[], dict[str, str]] | None = None) -> MachineProfile:
@@ -39,7 +53,8 @@ def probe_machine(node_id: UUID, *,
         gpus = tuple(gpu.model_copy(update={'uuid': uuids.get(gpu.slot)}) for gpu in gpus)
     return MachineProfile(node_id=node_id, os=_label(platform.system()) or 'unknown',
         os_version=_label(platform.version()) or 'unknown', architecture=_label(platform.machine()) or 'unknown',
-        cpu=_label(platform.processor()), logical_cpus=os.cpu_count(), ram_bytes=_physical_memory(),
+        cpu=_label(platform.processor()) or _label(_windows_cpu_name()),
+        logical_cpus=os.cpu_count(), ram_bytes=_physical_memory(),
         gpus=gpus, cuda_runtime=nvidia.cuda_driver_api)
 
 

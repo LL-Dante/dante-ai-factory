@@ -224,7 +224,10 @@ class NodeQualificationGate:
         self.store, self.current = store, current
 
     def __call__(self, model: ModelRef, *, tool_use=False) -> None:
-        identity = self.current(model)
+        try:
+            identity = self.current(model)
+        except Exception:
+            raise ValueError('Current qualification identity unavailable') from None
         metadata = model.local_metadata
         artifact = None if metadata is None else (
             metadata.sha256 if identity.artifact_kind == 'file' else metadata.runtime_digest)

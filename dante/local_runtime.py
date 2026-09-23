@@ -19,12 +19,12 @@ class LocalRuntimeAdapter:
     default_url = ''
 
     def __init__(self, profile: RuntimeProfile | None = None, *, machine_profile='default', transport=None,
-                 provider_id: str | None = None):
+                 provider_id: str | None = None, registry: ModelRegistry | None = None):
         self.profile = profile or RuntimeProfile(runtime=self.runtime, base_url=self.default_url)
         if self.profile.runtime != self.runtime:
             raise ValueError('Runtime profile mismatch')
         self.provider_id = provider_id or self.runtime
-        self.machine_profile, self.transport = machine_profile, transport
+        self.machine_profile, self.transport, self.registry = machine_profile, transport, registry
 
     def _json(self, path, body=None, *, allow_not_found=False):
         try:
@@ -103,7 +103,8 @@ class LocalRuntimeAdapter:
         if not model.local or model.runtime != self.runtime or model.provider_id != self.provider_id:
             raise PolicyDenied('Local runtime/model mismatch')
         try:
-            ModelRegistry(machine_profile=self.machine_profile).require_automatic(model, tool_use=bool(request.tools))
+            (self.registry or ModelRegistry(machine_profile=self.machine_profile)).require_automatic(
+                model, tool_use=bool(request.tools))
         except ValueError:
             raise QualificationDenied('Local model qualification or integrity failed') from None
         if request.max_output_tokens is not None and request.max_output_tokens > model.local_metadata.context_tokens:

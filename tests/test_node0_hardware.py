@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from dante.node0_hardware import main
+from dante.node0_hardware import main, run
 
 
 class HardwareHarnessSafetyTests(unittest.TestCase):
@@ -26,8 +26,11 @@ class HardwareHarnessSafetyTests(unittest.TestCase):
                      'Requires explicit Node 0 physical qualification opt-in and config')
 class PhysicalNode0Test(unittest.TestCase):
     def test_actual_hardware_pipeline(self):
-        self.assertEqual(main(['--config', os.environ['DANTE_NODE0_CONFIG'],
-                               '--run-hardware']), 0)
+        result = run(Path(os.environ['DANTE_NODE0_CONFIG']))
+        self.assertEqual(result['result'], 'PASS')
+        self.assertTrue(result['identity_mismatch_denied'])
+        self.assertTrue(result['correct_identity_allowed'])
+        self.assertEqual(result['route'], 'local_ollama')
 
 
 if __name__ == '__main__':

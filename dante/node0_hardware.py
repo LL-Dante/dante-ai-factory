@@ -79,17 +79,35 @@ def run(config_path: Path) -> dict:
                     if item.check == check), None),
                     'evidence_sha256': next((item.evidence_sha256 for item in result.checks
                     if item.check == check), None)} for check in Check},
+              'identity_mismatch_denied': None, 'correct_identity_allowed': None,
               'route': 'not_attempted', 'inference': 'not_attempted'}
     if observation_available and assessment.state.value == 'qualified':
-        node.continuity.observe('ollama', BackendState.AVAILABLE)
-        task = node.host.start('Node 0 qualification inference', '.', PrivacyClass.PUBLIC)
         try:
-            response = node.host.infer(task.task_id, 'Reply with one short word.', set())
-            report['route'] = 'local_ollama'
-            report['inference'] = 'passed' if response is not None else 'failed'
+            approved_model = node.registry.get(model.model_id)
+            altered_metadata = approved_model.local_metadata.model_copy(
+                update={'runtime_digest': '0' * 64})
+            try:
+                node.gate(approved_model.model_copy(update={'local_metadata': altered_metadata}))
+                report['identity_mismatch_denied'] = False
+            except ValueError:
+                report['identity_mismatch_denied'] = True
+            node.registry.require_automatic(approved_model)
+            report['correct_identity_allowed'] = True
         except Exception as exc:
+            report['correct_identity_allowed'] = False
             report['inference'] = type(exc).__name__
+        if report['identity_mismatch_denied'] and report['correct_identity_allowed']:
+            node.continuity.observe('ollama', BackendState.AVAILABLE)
+            task = node.host.start('Node 0 qualification inference', '.', PrivacyClass.PUBLIC)
+            try:
+                response = node.host.infer(task.task_id, 'Reply with one short word.', set())
+                report['route'] = 'local_ollama'
+                report['inference'] = 'passed' if response is not None else 'failed'
+            except Exception as exc:
+                report['inference'] = type(exc).__name__
     report['result'] = 'PASS' if (observation_available and assessment.state.value == 'qualified'
+                                  and report['identity_mismatch_denied'] is True
+                                  and report['correct_identity_allowed'] is True
                                   and report['inference'] == 'passed') else 'FAILED'
     return report
 

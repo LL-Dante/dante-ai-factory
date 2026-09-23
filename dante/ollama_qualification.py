@@ -359,6 +359,20 @@ class OllamaQualificationProbe:
         if self.http.get('/api/version').get('version') != self.identity.runtime.version:
             raise ProbeFailure('assertion_failed')
 
+    def _endpoint_closed(self) -> bool:
+        """Prove the owned loopback port has no listener without a timed connect."""
+        parsed = urlsplit(self.config.profile.base_url)
+        host, port = parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80)
+        family = socket.AF_INET6 if ':' in host else socket.AF_INET
+        probe = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            probe.bind((host, port))
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
+
     def _check(self, check: Check) -> dict[str, str | int | float | bool | None]:
         if check == Check.LOAD:
             self.runtime.start()
@@ -397,14 +411,9 @@ class OllamaQualificationProbe:
             try:
                 self._health()
             except ProbeFailure as failure:
-                if failure.reason in {'unavailable', 'timeout'}:
-                    parsed = urlsplit(self.config.profile.base_url)
-                    try:
-                        with socket.create_connection((parsed.hostname, parsed.port or 80), timeout=0.5):
-                            raise ProbeFailure('assertion_failed')
-                    except ConnectionRefusedError:
-                        return {'owned_process_stopped': True, 'typed_failure': failure.reason,
-                                'endpoint_closed': True}
+                if failure.reason in {'unavailable', 'timeout'} and self._endpoint_closed():
+                    return {'owned_process_stopped': True, 'typed_failure': failure.reason,
+                            'endpoint_closed': True}
                 raise
             raise ProbeFailure('assertion_failed')
         if check == Check.RECOVERY:

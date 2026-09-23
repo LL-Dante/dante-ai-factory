@@ -156,8 +156,7 @@ class OllamaQualificationTests(unittest.TestCase):
 
     def test_all_eight_checks_pass_but_fixture_cannot_qualify(self):
         probe = self.probe()
-        with patch('dante.ollama_qualification.socket.create_connection',
-                   side_effect=ConnectionRefusedError):
+        with patch.object(probe, '_endpoint_closed', return_value=True):
             result = QualificationRunner(self.store).run(probe)
         self.assertEqual(probe.source, 'synthetic')
         self.assertFalse(result.interrupted)

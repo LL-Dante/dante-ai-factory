@@ -158,14 +158,16 @@ class ManagedOllamaRuntime:
                 return frozenset(pids)
             rows = json.loads(result.stdout)
             rows = rows if isinstance(rows, list) else [rows]
-            expected = str(self.config.executable.resolve()).casefold()
+            executable = self.config.executable.resolve()
+            expected = {str(executable).casefold(),
+                        str(executable.parent / 'lib' / 'ollama' / 'llama-server.exe').casefold()}
             changed = True
             while changed:
                 before = len(pids)
                 for row in rows:
                     if (row.get('ParentProcessId') in pids and isinstance(row.get('ProcessId'), int)
                             and isinstance(row.get('ExecutablePath'), str)
-                            and row['ExecutablePath'].casefold() == expected):
+                            and row['ExecutablePath'].casefold() in expected):
                         pids.add(row['ProcessId'])
                 changed = len(pids) != before
         except (OSError, subprocess.SubprocessError, ValueError, TypeError):
@@ -324,7 +326,7 @@ class OllamaQualificationProbe:
         return matches[0]['size_vram']
 
     def _body(self, prompt: str, *, stream: bool = False, predict: int = 32) -> dict:
-        return {'model': self.config.model_reference, 'stream': stream,
+        return {'model': self.config.model_reference, 'stream': stream, 'think': False,
                 'messages': [{'role': 'user', 'content': prompt}], 'keep_alive': '10m',
                 'options': {'num_ctx': self.config.context_tokens, 'num_predict': predict,
                             'temperature': 0}}
@@ -380,8 +382,14 @@ class OllamaQualificationProbe:
             try:
                 self._health()
             except ProbeFailure as failure:
-                if failure.reason == 'unavailable':
-                    return {'owned_process_stopped': True, 'typed_failure': 'unavailable'}
+                if failure.reason in {'unavailable', 'timeout'}:
+                    parsed = urlsplit(self.config.profile.base_url)
+                    try:
+                        with socket.create_connection((parsed.hostname, parsed.port or 80), timeout=0.5):
+                            raise ProbeFailure('assertion_failed')
+                    except ConnectionRefusedError:
+                        return {'owned_process_stopped': True, 'typed_failure': failure.reason,
+                                'endpoint_closed': True}
                 raise
             raise ProbeFailure('assertion_failed')
         if check == Check.RECOVERY:

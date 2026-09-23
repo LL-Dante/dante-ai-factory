@@ -1,5 +1,7 @@
 """Deterministic qualification fixtures; these never claim physical hardware."""
 from pathlib import Path
+from dataclasses import replace
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,7 +12,7 @@ from dante.contracts.qualification import Check, QualificationState
 from dante.contracts.runtime import RuntimeProfile
 from dante.ledger import TaskLedger
 from dante.ollama_qualification import (
-    ExternalOllamaRuntime, OllamaQualificationConfig, OllamaQualificationHTTP,
+    ExternalOllamaRuntime, ManagedOllamaRuntime, OllamaQualificationConfig, OllamaQualificationHTTP,
     OllamaQualificationProbeFactory, ProbeFailure,
 )
 from dante.qualification import QualificationRunner, QualificationStore
@@ -113,9 +115,28 @@ class OllamaQualificationTests(unittest.TestCase):
             nvidia_factory=lambda _: nvidia or self.nvidia)
         return factory(self.current)
 
+    def test_owned_windows_llama_runner_pid_is_attributed_only_by_exact_path_and_parent(self):
+        import os
+        import subprocess
+        if os.name != 'nt':
+            self.skipTest('Windows process ancestry contract')
+        executable = self.root / 'Ollama' / 'ollama.exe'
+        config = replace(self.config, executable=executable, model_store=self.root)
+        runtime = ManagedOllamaRuntime(config)
+        runtime.process = type('Process', (), {'pid': 123, 'poll': lambda self: None})()
+        runner = str(executable.parent / 'lib' / 'ollama' / 'llama-server.exe')
+        rows = [{'ProcessId': 456, 'ParentProcessId': 123, 'ExecutablePath': runner},
+                {'ProcessId': 789, 'ParentProcessId': 123, 'ExecutablePath': str(self.root / 'evil.exe')},
+                {'ProcessId': 999, 'ParentProcessId': 321, 'ExecutablePath': runner}]
+        completed = subprocess.CompletedProcess([], 0, stdout=json.dumps(rows).encode())
+        with patch('dante.ollama_qualification.subprocess.run', return_value=completed):
+            self.assertEqual(runtime.pids(), frozenset({123, 456}))
+
     def test_all_eight_checks_pass_but_fixture_cannot_qualify(self):
         probe = self.probe()
-        result = QualificationRunner(self.store).run(probe)
+        with patch('dante.ollama_qualification.socket.create_connection',
+                   side_effect=ConnectionRefusedError):
+            result = QualificationRunner(self.store).run(probe)
         self.assertEqual(probe.source, 'synthetic')
         self.assertFalse(result.interrupted)
         self.assertEqual({item.check for item in result.checks if item.outcome == 'passed'},

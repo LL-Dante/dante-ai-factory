@@ -83,7 +83,7 @@ class OllamaIdentityObserver:
         runtime = RuntimeObservation(runtime_id=self.requested.runtime.runtime_id,
             runtime='ollama', version=version,
             backend=self._backend(model_digest, machine), binary_sha256=binary_digest,
-            configuration_sha256=runtime_config, probe_version='ollama-execution-v1')
+            configuration_sha256=runtime_config, probe_version='ollama-execution-v2')
         return QualificationIdentity(machine=machine, runtime=runtime,
             model_id=self.requested.model_id, artifact_kind='runtime_manifest',
             artifact_sha256=model_digest, quantization=quantization,

@@ -62,11 +62,17 @@ def run(config_path: Path) -> dict:
         machine_profile=_required(raw, 'machine_profile'),
         policy=ContinuityPolicy(mode=ExecutionPolicy.LOCAL_ONLY))
     result = node.qualify()
-    current = node.probe.observe()
+    try:
+        current = node.probe.observe()
+        observation_available = True
+    except Exception:
+        current = result.identity
+        observation_available = False
     assessment = node.store.status(current)
     report = {'node_uuid': str(node_id), 'model_id': model.model_id,
               'qualification_id': str(result.qualification_id),
-              'state': assessment.state.value,
+              'state': assessment.state.value if observation_available else 'failed',
+              'fresh_observation_available': observation_available,
               'checks': {check.value: {'outcome': next((item.outcome for item in result.checks
                     if item.check == check), 'unknown'),
                     'failure': next((item.failure for item in result.checks
@@ -74,7 +80,7 @@ def run(config_path: Path) -> dict:
                     'evidence_sha256': next((item.evidence_sha256 for item in result.checks
                     if item.check == check), None)} for check in Check},
               'route': 'not_attempted', 'inference': 'not_attempted'}
-    if assessment.state.value == 'qualified':
+    if observation_available and assessment.state.value == 'qualified':
         node.continuity.observe('ollama', BackendState.AVAILABLE)
         task = node.host.start('Node 0 qualification inference', '.', PrivacyClass.PUBLIC)
         try:
@@ -83,7 +89,7 @@ def run(config_path: Path) -> dict:
             report['inference'] = 'passed' if response is not None else 'failed'
         except Exception as exc:
             report['inference'] = type(exc).__name__
-    report['result'] = 'PASS' if (assessment.state.value == 'qualified'
+    report['result'] = 'PASS' if (observation_available and assessment.state.value == 'qualified'
                                   and report['inference'] == 'passed') else 'FAILED'
     return report
 

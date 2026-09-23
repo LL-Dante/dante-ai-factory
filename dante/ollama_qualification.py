@@ -89,7 +89,7 @@ class ManagedOllamaRuntime:
     def start(self) -> None:
         if self.process is not None:
             if self.process.poll() is None:
-                raise ProbeFailure('probe_error')
+                return  # The same owned Popen handle is already running.
             self.process = None
         executable = self.config.executable.resolve(strict=True)
         if executable.name.lower() != 'ollama.exe':
@@ -266,17 +266,24 @@ class OllamaQualificationProbe:
                  evidence: EvidenceStore, runtime: RuntimeControl, http: OllamaQualificationHTTP,
                  nvidia: NvidiaProcessEvidence, *, synthetic: bool = False,
                  clock: Callable[[], float] = time.monotonic,
-                 now: Callable[[], datetime] = utc_now):
+                 now: Callable[[], datetime] = utc_now,
+                 observer: Callable[[], QualificationIdentity] | None = None):
         self.identity, self.config, self.evidence = identity, config, evidence
         self.runtime, self.http, self.nvidia = runtime, http, nvidia
         self.source = 'synthetic' if synthetic else 'hardware'
         self.clock, self.now = clock, now
+        self.observer = observer
+        self.attempt_id = None
+        self.deadline_s = None
         self._load_s: float | None = None
         self._peak_vram: int | None = None
         self._last_observation = identity
 
     def observe(self) -> QualificationIdentity:
-        return self._last_observation
+        return self.observer() if self.observer is not None else self._last_observation
+
+    def begin_attempt(self, attempt_id, deadline_s: float) -> None:
+        self.attempt_id, self.deadline_s = attempt_id, deadline_s
 
     def _exact_inventory(self) -> None:
         version = self.http.get('/api/version').get('version')
@@ -419,7 +426,20 @@ class OllamaQualificationProbe:
             self._load_s = duration
         document = EvidenceDocument(identity_fingerprint=self.identity.fingerprint,
             node_id=str(self.identity.machine.node_id), check=check, outcome=outcome,
-            started_at=started, completed_at=self.now(), facts=facts, failure=failure)
+            attempt_id=self.attempt_id, started_at=started, completed_at=self.now(),
+            deadline_s=self.deadline_s, gpu_uuid=self.config.gpu_uuid,
+            gpu_name=next((gpu.name for gpu in self.identity.machine.gpus or ()
+                           if gpu.uuid == self.config.gpu_uuid), None),
+            gpu_driver=next((gpu.driver_version for gpu in self.identity.machine.gpus or ()
+                             if gpu.uuid == self.config.gpu_uuid), None),
+            runtime_id=self.identity.runtime.runtime_id,
+            runtime_version=self.identity.runtime.version,
+            runtime_configuration_sha256=self.identity.runtime.configuration_sha256,
+            model_reference=self.config.model_reference,
+            model_digest=self.config.model_digest,
+            quantization=self.config.quantization, context_tokens=self.config.context_tokens,
+            qualification_configuration_sha256=self.identity.configuration_sha256,
+            facts=facts, failure=failure)
         key = self.evidence.put(document)
         return CheckEvidence(check=check, outcome=outcome, evidence_sha256=key,
                              failure=failure, duration_s=duration)
@@ -434,6 +454,7 @@ class OllamaQualificationProbeFactory:
                  runtime_factory: Callable[[OllamaQualificationConfig], RuntimeControl] | None = None,
                  http_factory: Callable[[OllamaQualificationConfig], OllamaQualificationHTTP] | None = None,
                  nvidia_factory: Callable[[OllamaQualificationConfig], NvidiaProcessEvidence] | None = None,
+                 observer_factory: Callable[..., Callable[[], QualificationIdentity]] | None = None,
                  clock: Callable[[], float] | None = None,
                  now: Callable[[], datetime] | None = None):
         self.config, self.evidence = config, evidence
@@ -441,6 +462,7 @@ class OllamaQualificationProbeFactory:
             if cfg.executable is not None else ExternalOllamaRuntime())
         self.http_factory = http_factory or OllamaQualificationHTTP
         self.nvidia_factory = nvidia_factory or NvidiaProcessEvidence
+        self.observer_factory = observer_factory
         self.clock, self.now = clock, now
         self.synthetic = any(item is not None for item in
             (runtime_factory, http_factory, nvidia_factory, clock, now))
@@ -456,6 +478,23 @@ class OllamaQualificationProbeFactory:
             options['clock'] = self.clock
         if self.now is not None:
             options['now'] = self.now
+        runtime = self.runtime_factory(self.config)
+        http = self.http_factory(self.config)
+        nvidia = self.nvidia_factory(self.config)
+        if self.observer_factory is not None:
+            options['observer'] = self.observer_factory(identity, self.config, runtime, http, nvidia)
+        elif not self.synthetic:
+            from dante.ollama_identity import OllamaIdentityObserver
+            options['observer'] = OllamaIdentityObserver(identity, self.config, runtime, http, nvidia)
         return OllamaQualificationProbe(identity, self.config, self.evidence,
-            self.runtime_factory(self.config), self.http_factory(self.config),
-            self.nvidia_factory(self.config), synthetic=self.synthetic, **options)
+            runtime, http, nvidia, synthetic=self.synthetic, **options)
+
+    def prepare(self, requested: QualificationIdentity) -> tuple[QualificationIdentity, OllamaQualificationProbe]:
+        probe = self(requested)
+        prepare = getattr(probe.observer, 'prepare', None)
+        if prepare is None:
+            raise ValueError('A fresh production observer is required')
+        current = prepare()
+        probe.identity = current
+        probe.observer.requested = current
+        return current, probe

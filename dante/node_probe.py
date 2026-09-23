@@ -29,13 +29,18 @@ def _physical_memory() -> int | None:
 
 
 def probe_machine(node_id: UUID, *,
-                  nvidia_probe: Callable[[], NvidiaObservation] | None = None) -> MachineProfile:
+                  nvidia_probe: Callable[[], NvidiaObservation] | None = None,
+                  uuid_probe: Callable[[], dict[str, str]] | None = None) -> MachineProfile:
     """No hostname, username, serial numbers, paths, environment dumps or GPU guesses."""
     nvidia = (nvidia_probe or discover_nvidia)()
+    gpus = nvidia.gpus
+    if gpus is not None and uuid_probe is not None:
+        uuids = uuid_probe()
+        gpus = tuple(gpu.model_copy(update={'uuid': uuids.get(gpu.slot)}) for gpu in gpus)
     return MachineProfile(node_id=node_id, os=_label(platform.system()) or 'unknown',
         os_version=_label(platform.version()) or 'unknown', architecture=_label(platform.machine()) or 'unknown',
         cpu=_label(platform.processor()), logical_cpus=os.cpu_count(), ram_bytes=_physical_memory(),
-        gpus=nvidia.gpus, cuda_runtime=nvidia.cuda_driver_api)
+        gpus=gpus, cuda_runtime=nvidia.cuda_driver_api)
 
 
 class RuntimeInventory(Protocol):

@@ -25,6 +25,7 @@ class GPUProfile(EvidenceModel):
     slot: Label  # Local ordinal, never a hardware serial number.
     vendor: Label
     name: Label
+    uuid: Label | None = None
     vram_bytes: PositiveInt | None = None
     compute_capability: Label | None = None
     driver_version: Label | None = None
@@ -121,6 +122,9 @@ class QualificationIdentity(EvidenceModel):
                         if gpu.vram_bytes is None or unknown(gpu.driver_version)]
         if self.runtime.backend == 'cuda' and unknown(self.machine.cuda_runtime):
             missing.append('machine.cuda_runtime')
+        if self.runtime.backend == 'cuda' and self.machine.gpus is not None:
+            missing += ['gpu.' + gpu.slot + '.uuid' for gpu in self.machine.gpus
+                        if gpu.vendor == 'NVIDIA' and unknown(gpu.uuid)]
         return tuple(missing)
 
 

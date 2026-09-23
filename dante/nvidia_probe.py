@@ -129,3 +129,28 @@ def discover_nvidia(runner: CommandRunner | None = None) -> NvidiaObservation:
         return NvidiaObservation(tool_available=True)
     except (OSError, subprocess.SubprocessError, csv.Error, ValueError, TypeError, AttributeError):
         return NvidiaObservation(tool_available=False)
+
+
+def discover_gpu_uuids(runner: CommandRunner | None = None) -> dict[str, str]:
+    """Optional exact GPU UUIDs; malformed or unavailable output grants nothing."""
+    if runner is None:
+        executable = shutil.which('nvidia-smi')
+        if executable is None:
+            return {}
+        runner = lambda arguments: _run(executable, arguments)
+    try:
+        output = runner(('--query-gpu=index,uuid', '--format=csv,noheader,nounits'))
+        if output.returncode != 0 or not _bounded(output):
+            return {}
+        result = {}
+        for row in csv.reader(io.StringIO(output.stdout), skipinitialspace=True):
+            if len(row) != 2:
+                return {}
+            slot, uuid = row[0].strip(), row[1].strip()
+            if (not slot.isascii() or not slot.isdecimal() or not uuid.startswith('GPU-')
+                    or not _LABEL.fullmatch(uuid) or slot in result):
+                return {}
+            result[slot] = uuid
+        return result
+    except (OSError, subprocess.SubprocessError, csv.Error, ValueError, TypeError):
+        return {}

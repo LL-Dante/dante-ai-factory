@@ -177,8 +177,12 @@ class QualificationRunner:
             raise value
         return CheckEvidence.model_validate_json(value.model_dump_json())
 
-    def run(self, probe: QualificationProbe) -> ModelQualification:
-        identity = QualificationIdentity.model_validate_json(probe.observe().model_dump_json())
+    def run(self, probe: QualificationProbe, *,
+            requested_identity: QualificationIdentity | None = None) -> ModelQualification:
+        # Production callers provide a scope before observation. If observation
+        # fails, the intent still supersedes an older PASS in that scope.
+        identity = QualificationIdentity.model_validate_json(
+            (requested_identity or probe.observe()).model_dump_json())
         started = utc_now()
         attempt_id = uuid4()
         # Crash during a new qualification leaves UNKNOWN, never an old qualified result.
@@ -187,17 +191,23 @@ class QualificationRunner:
         self.store.append(intent)
         checks, interrupted, performance = [], False, PerformanceEvidence()
         try:
-            for check in Check:
-                evidence = self._bounded_check(probe, check)
-                if evidence.check != check:
-                    raise ValueError('Mismatched check evidence')
-                checks.append(evidence)
-                if evidence.outcome == 'failed' and evidence.failure == 'timeout':
-                    interrupted = True
-                    break
-            performance = PerformanceEvidence.model_validate_json(probe.performance().model_dump_json())
-            if changed_inputs(identity, probe.observe()):
-                interrupted = True  # Identity changed while measurements were in flight.
+            begin = getattr(probe, 'begin_attempt', None)
+            if begin is not None:
+                begin(attempt_id, self.check_deadline_s)
+            if requested_identity is not None and changed_inputs(identity, probe.observe()):
+                interrupted = True
+            else:
+                for check in Check:
+                    evidence = self._bounded_check(probe, check)
+                    if evidence.check != check:
+                        raise ValueError('Mismatched check evidence')
+                    checks.append(evidence)
+                    if evidence.outcome == 'failed' and evidence.failure == 'timeout':
+                        interrupted = True
+                        break
+                performance = PerformanceEvidence.model_validate_json(probe.performance().model_dump_json())
+                if changed_inputs(identity, probe.observe()):
+                    interrupted = True  # Identity changed while measurements were in flight.
         except Exception:
             interrupted = True  # Never persist arbitrary exception messages.
         record = ModelQualification(qualification_id=uuid4(), attempt_id=attempt_id, phase='completed',

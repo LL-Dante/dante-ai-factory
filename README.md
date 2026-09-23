@@ -146,12 +146,14 @@ gateway. No cptr source, binary, patch fragment, branding or asset is included.
   forcibly terminate arbitrary code; uncertain effects may require operator review.
 - Keep gateway/runtime services on loopback and use a trusted local account.
 - Real local model inference, real llama.cpp runtime and workstation hardware have
-  not been qualified. vLLM is not qualified or included.
+  not yet been physically qualified. vLLM is not qualified or included.
 - Unknown usage/cost stays unknown. Gemini remains COST_UNVERIFIED and automatic
   continuity routing denies unverified cloud cost and paid routes.
 - Health or installed-model inventory does not establish model qualification.
-- No real-hardware qualification harness, RAG, Control API, Media Factory or
-  workstation-specific tuning is included. P7 inventory alone grants no approval.
+- An opt-in native Ollama Node 0 hardware qualification harness is included, but
+  has not run on physical Node 0. See [Node 0 qualification](docs/node0-native-qualification.md).
+  RAG, Control API, Media Factory and workstation-specific tuning are not included.
+  P7 inventory alone grants no approval.
 
 See SECURITY.md, CONTRIBUTING.md and LICENSE-DECISION.md before redistribution.
 The canonical public source is [LL-Dante/dante-ai-factory](https://github.com/LL-Dante/dante-ai-factory).

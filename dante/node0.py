@@ -76,8 +76,12 @@ class Node0Runtime:
         """Supersede prior PASS before preflight, including when preflight raises."""
         attempt = uuid4()
         started = utc_now()
+        # The intended CUDA scope must supersede an earlier CUDA PASS even if
+        # the runtime is currently down and the fresh observer cannot run.
+        scope_identity = self.requested_identity.model_copy(update={
+            'runtime': self.requested_identity.runtime.model_copy(update={'backend': 'cuda'})})
         self.store.append(ModelQualification(qualification_id=uuid4(), attempt_id=attempt,
-            phase='intent', identity=self.requested_identity, source=self.probe.source,
+            phase='intent', identity=scope_identity, source=self.probe.source,
             started_at=started))
         self.audit.write('qualification.started', attempt_id=str(attempt),
                          model=self.requested_identity.model_id)
@@ -91,7 +95,7 @@ class Node0Runtime:
             result = QualificationRunner(self.store).run(self.probe, requested_identity=current)
         except Exception:
             self.store.append(ModelQualification(qualification_id=uuid4(), attempt_id=attempt,
-                phase='completed', identity=self.requested_identity, source=self.probe.source,
+                phase='completed', identity=scope_identity, source=self.probe.source,
                 started_at=started, completed_at=utc_now(), interrupted=True))
             self.audit.write('qualification.failed', attempt_id=str(attempt), reason='preflight_or_runner_error')
             raise

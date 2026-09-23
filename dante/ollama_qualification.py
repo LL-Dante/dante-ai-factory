@@ -130,6 +130,21 @@ class ManagedOllamaRuntime:
         process = self.process
         if process is None:
             return False
+        if os.name == 'nt' and process.poll() is None:
+            # Ollama delegates GPU work to llama-server.exe. Stop only the
+            # validated descendants of this owned process before its parent.
+            descendants = sorted(self.pids() - {process.pid}, reverse=True)
+            for pid in descendants:
+                if pid not in self.pids():
+                    continue
+                try:
+                    result = subprocess.run(['taskkill.exe', '/PID', str(pid), '/F'],
+                        stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
+                        check=False, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                except (OSError, subprocess.SubprocessError):
+                    return False
+                if result.returncode != 0 and pid in self.pids():
+                    return False
         if process.poll() is None:
             process.terminate()
             try:

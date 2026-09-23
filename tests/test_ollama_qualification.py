@@ -132,6 +132,28 @@ class OllamaQualificationTests(unittest.TestCase):
         with patch('dante.ollama_qualification.subprocess.run', return_value=completed):
             self.assertEqual(runtime.pids(), frozenset({123, 456}))
 
+    def test_owned_runtime_stop_terminates_validated_runner_before_parent(self):
+        import os
+        import subprocess
+        if os.name != 'nt':
+            self.skipTest('Windows process ownership contract')
+        config = replace(self.config, executable=self.root / 'Ollama' / 'ollama.exe',
+                         model_store=self.root)
+        runtime = ManagedOllamaRuntime(config)
+        class Process:
+            pid = 123
+            alive = True
+            def poll(self): return None if self.alive else 0
+            def terminate(self): self.alive = False
+            def wait(self, timeout): return 0
+        runtime.process = Process()
+        with patch.object(runtime, 'pids', return_value=frozenset({123, 456})), \
+             patch('dante.ollama_qualification.subprocess.run',
+                   return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.assertTrue(runtime.stop())
+        self.assertEqual(run.call_args.args[0][:4], ['taskkill.exe', '/PID', '456', '/F'])
+        self.assertIsNone(runtime.process)
+
     def test_all_eight_checks_pass_but_fixture_cannot_qualify(self):
         probe = self.probe()
         with patch('dante.ollama_qualification.socket.create_connection',

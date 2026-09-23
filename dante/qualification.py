@@ -6,6 +6,8 @@ No production runtime is probed or promoted automatically.
 from collections.abc import Callable
 from contextlib import closing
 import json
+from queue import Queue
+from threading import Thread
 from typing import Protocol, Literal
 from uuid import UUID, uuid4
 
@@ -17,6 +19,7 @@ from dante.contracts.qualification import (
 )
 from dante.ledger import TaskLedger
 from dante.recovery import digest
+from dante.qualification_evidence import EvidenceStore
 
 
 def changed_inputs(before: QualificationIdentity, current: QualificationIdentity) -> tuple[str, ...]:
@@ -58,8 +61,9 @@ def assess(record: ModelQualification, current: QualificationIdentity) -> Qualif
 
 class QualificationStore:
     """Append-only snapshots in the existing ledger; no second database or connection policy."""
-    def __init__(self, ledger: TaskLedger):
+    def __init__(self, ledger: TaskLedger, evidence_store: EvidenceStore | None = None):
         self.ledger = ledger
+        self.evidence_store = evidence_store
 
     def record_machine(self, machine: MachineProfile) -> str:
         machine = MachineProfile.model_validate_json(machine.model_dump_json())
@@ -122,7 +126,11 @@ class QualificationStore:
 
     def status(self, current: QualificationIdentity) -> QualificationAssessment:
         latest = self.latest(current)
-        return assess(latest, current) if latest else QualificationAssessment(state=State.UNKNOWN, reasons=('no_evidence',))
+        result = assess(latest, current) if latest else QualificationAssessment(state=State.UNKNOWN, reasons=('no_evidence',))
+        if (result.state == State.QUALIFIED and self.evidence_store is not None
+                and not self.evidence_store.verify_record(latest)):
+            return QualificationAssessment(state=State.UNKNOWN, reasons=('evidence_missing_or_corrupt',))
+        return result
 
     def require_qualified(self, current: QualificationIdentity, *, tool_use=False) -> None:
         result = self.status(current)
@@ -144,8 +152,30 @@ class QualificationProbe(Protocol):
 
 
 class QualificationRunner:
-    def __init__(self, store: QualificationStore):
+    def __init__(self, store: QualificationStore, *, check_deadline_s: float = 30.0):
+        if check_deadline_s <= 0:
+            raise ValueError('Check deadline must be positive')
         self.store = store
+        self.check_deadline_s = check_deadline_s
+
+    def _bounded_check(self, probe: QualificationProbe, check: Check) -> CheckEvidence:
+        # A daemon thread bounds the caller and fails the attempt closed. Production
+        # probes additionally own killable subprocesses for work that can outlive HTTP.
+        result: Queue[tuple[bool, object]] = Queue(maxsize=1)
+        def invoke():
+            try:
+                result.put((True, probe.run(check)))
+            except BaseException as exc:
+                result.put((False, exc))
+        worker = Thread(target=invoke, daemon=True, name='qualification-' + check.value)
+        worker.start()
+        worker.join(self.check_deadline_s)
+        if worker.is_alive():
+            return CheckEvidence(check=check, outcome='failed', failure='timeout')
+        success, value = result.get_nowait()
+        if not success:
+            raise value
+        return CheckEvidence.model_validate_json(value.model_dump_json())
 
     def run(self, probe: QualificationProbe) -> ModelQualification:
         identity = QualificationIdentity.model_validate_json(probe.observe().model_dump_json())
@@ -158,10 +188,13 @@ class QualificationRunner:
         checks, interrupted, performance = [], False, PerformanceEvidence()
         try:
             for check in Check:
-                evidence = CheckEvidence.model_validate_json(probe.run(check).model_dump_json())
+                evidence = self._bounded_check(probe, check)
                 if evidence.check != check:
                     raise ValueError('Mismatched check evidence')
                 checks.append(evidence)
+                if evidence.outcome == 'failed' and evidence.failure == 'timeout':
+                    interrupted = True
+                    break
             performance = PerformanceEvidence.model_validate_json(probe.performance().model_dump_json())
             if changed_inputs(identity, probe.observe()):
                 interrupted = True  # Identity changed while measurements were in flight.

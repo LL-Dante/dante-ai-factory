@@ -61,6 +61,16 @@ def run(config_path: Path) -> dict:
         seed_identity=seed, qualification=config, models=[model],
         machine_profile=_required(raw, 'machine_profile'),
         policy=ContinuityPolicy(mode=ExecutionPolicy.LOCAL_ONLY))
+    try:
+        return _qualify_and_report(node, node_id, model)
+    finally:
+        # A one-shot qualification owns its process tree and must not leave an
+        # Ollama server behind when the Python test process exits.
+
+        node.probe.runtime.stop()
+
+
+def _qualify_and_report(node, node_id, model) -> dict:
     result = node.qualify()
     try:
         current = node.probe.observe()

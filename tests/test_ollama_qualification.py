@@ -140,6 +140,7 @@ class OllamaQualificationTests(unittest.TestCase):
         config = replace(self.config, executable=self.root / 'Ollama' / 'ollama.exe',
                          model_store=self.root)
         runtime = ManagedOllamaRuntime(config)
+        runtime._pid_inventory_valid = True
         class Process:
             pid = 123
             alive = True
@@ -147,12 +148,53 @@ class OllamaQualificationTests(unittest.TestCase):
             def terminate(self): self.alive = False
             def wait(self, timeout): return 0
         runtime.process = Process()
-        with patch.object(runtime, 'pids', return_value=frozenset({123, 456})), \
-             patch('dante.ollama_qualification.subprocess.run',
-                   return_value=subprocess.CompletedProcess([], 0)) as run:
+        child = {'alive': True}
+        def pids(): return frozenset({123, 456} if child['alive'] else {123})
+        def taskkill(args, **kwargs):
+            if args[2] == '456': child['alive'] = False
+            return subprocess.CompletedProcess(args, 0)
+        with patch.object(runtime, 'pids', side_effect=pids), \
+             patch('dante.ollama_qualification.subprocess.run', side_effect=taskkill) as run:
             self.assertTrue(runtime.stop())
-        self.assertEqual(run.call_args.args[0][:4], ['taskkill.exe', '/PID', '456', '/F'])
+        self.assertEqual(run.call_args_list[0].args[0][:3], ['taskkill.exe', '/PID', '456'])
         self.assertIsNone(runtime.process)
+
+    def test_managed_runtime_stop_reaps_process_handle_and_is_idempotent(self):
+        import os
+        config = replace(self.config, executable=self.root / 'ollama.exe', model_store=self.root)
+        runtime = ManagedOllamaRuntime(config)
+        class Process:
+            pid = 123
+            alive = True
+            waited = False
+            def poll(self): return None if self.alive else 0
+            def terminate(self): self.alive = False
+            def wait(self, timeout): self.waited = True; return 0
+            def kill(self): self.alive = False
+        process = Process()
+        runtime.process = process
+        with patch('dante.ollama_qualification.os.name', 'posix'):
+            self.assertTrue(runtime.stop())
+            self.assertTrue(runtime.stop())
+        self.assertIsNone(runtime.process)
+        self.assertTrue(process.waited)
+
+    @unittest.skipUnless(__import__('os').name == 'nt', 'Windows Job Object integration')
+    def test_job_object_closes_only_the_owned_test_process(self):
+        import subprocess, sys
+        from dante.ollama_qualification import _create_kill_on_close_job, _close_job
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        try:
+            job = _create_kill_on_close_job(process)
+            self.assertIsNotNone(job, 'Windows must support the owned-process Job Object')
+            _close_job(job)
+            process.wait(timeout=5)
+            self.assertIsNotNone(process.returncode)
+        finally:
+            if process.poll() is None:
+                process.kill(); process.wait(timeout=5)
 
     def test_all_eight_checks_pass_but_fixture_cannot_qualify(self):
         probe = self.probe()

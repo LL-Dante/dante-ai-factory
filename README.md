@@ -32,8 +32,8 @@ Persistent task / acceptance -> SQLite ledger + worker queue
 - P5: qualified model registry and Ollama/llama.cpp adapter contracts.
 - P6: backend state, bounded retry/cooldown, route reevaluation and durable deferral.
 - P7: node qualification contracts, persistent evidence, identity invalidation and
-  an optional registry gate. The software layer is fixture-tested; physical Node 0
-  and real local inference remain NOT YET QUALIFIED. See [Node 0 qualification](docs/node-qualification.md).
+  an optional registry gate. The normal software suite uses fixtures; the physical
+  Node 0 record is retained locally. See [Node 0 qualification](docs/node-qualification.md).
 - P8: explicit local/cloud execution preference connected to P7 qualification and
   the existing persistent continuity path. Normalized quota/rate-limit state,
   provider cooldown and available reset metadata survive process restart. Selected
@@ -111,9 +111,11 @@ foundation 16, P1 17, P2 22, P3 24, P4 21, P5 33, P6 38. No test is removed or
 weakened. They include subprocess crash/restart and continuity tests and do not
 require external AI calls or model downloads. They do not qualify a real model.
 
-P7 adds 82 focused tests, P8 adds 17 routing/continuity/bridge tests and the
-hardening audits add 14 regressions; the current implementation passed 284/284
-offline tests.
+The normal suite contains the P7/P8 routing, qualification, runtime and bridge
+regressions plus persistence and security tests. It is independent of physical
+hardware and keeps the physical Node 0 integration test skipped unless explicitly
+enabled. The supervisor state machine and Windows process/startup contracts are
+also covered by deterministic tests.
 See [P7 verification and hardware procedure](docs/node-qualification.md) for scope
 and limitations. No GPU, CUDA, runtime server or model weights are required.
 
@@ -145,13 +147,15 @@ gateway. No cptr source, binary, patch fragment, branding or asset is included.
 - Trusted in-process Python handlers are not an OS sandbox. Thread timeout cannot
   forcibly terminate arbitrary code; uncertain effects may require operator review.
 - Keep gateway/runtime services on loopback and use a trusted local account.
-- Real local model inference, real llama.cpp runtime and workstation hardware have
-  not yet been physically qualified. vLLM is not qualified or included.
+- The Node 0 Ollama/Qwen3 path has physical qualification evidence on that
+  workstation. The llama.cpp runtime remains unqualified. vLLM is not qualified or included.
 - Unknown usage/cost stays unknown. Gemini remains COST_UNVERIFIED and automatic
   continuity routing denies unverified cloud cost and paid routes.
 - Health or installed-model inventory does not establish model qualification.
-- An opt-in native Ollama Node 0 hardware qualification harness is included, but
-  has not run on physical Node 0. See [Node 0 qualification](docs/node0-native-qualification.md).
+- An opt-in native Ollama Node 0 hardware qualification harness and long-lived
+  supervisor are included. Physical evidence remains on the workstation. See
+  [Node 0 qualification](docs/node0-native-qualification.md) and
+  [Node 0 supervisor](docs/node0-supervisor.md).
   RAG, Control API, Media Factory and workstation-specific tuning are not included.
   P7 inventory alone grants no approval.
 

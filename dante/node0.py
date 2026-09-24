@@ -109,9 +109,9 @@ def build_node0(*, ledger_path: Path, evidence_path: Path, audit_path: Path,
                 models: list[ModelRef], machine_profile: str,
                 policy: ContinuityPolicy | None = None,
                 probe_factory: OllamaQualificationProbeFactory | None = None,
-                adapters: list | None = None) -> Node0Runtime:
+                adapters: list | None = None, audit=None) -> Node0Runtime:
     """One ledger, evidence verifier, gate, registry and execution graph."""
-    audit = JsonlAudit(audit_path)
+    audit = audit or JsonlAudit(audit_path)
     ledger = TaskLedger(ledger_path, audit)
     evidence = EvidenceStore(evidence_path, strict=True, model_reference=qualification.model_reference)
     store = QualificationStore(ledger, evidence)

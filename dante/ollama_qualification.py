@@ -42,6 +42,8 @@ class OllamaQualificationConfig:
     model_store: Path | None = None
     stability_attempts: int = 3
     request_timeout_s: float = 20.0
+    startup_timeout_s: float = 10.0
+    shutdown_timeout_s: float = 5.0
 
     def __post_init__(self):
         if (self.profile.runtime != 'ollama' or self.profile.allow_remote
@@ -53,7 +55,9 @@ class OllamaQualificationConfig:
                 or not self.quantization or self.context_tokens < 64
                 or not self.gpu_uuid.startswith('GPU-')
                 or not 1 <= self.stability_attempts <= 10
-                or not 0 < self.request_timeout_s <= 60):
+                or not 0 < self.request_timeout_s <= 60
+                or not 2 <= self.startup_timeout_s <= 180
+                or not 1 <= self.shutdown_timeout_s <= 60):
             raise ValueError('Incomplete or unsafe qualification configuration')
         if (self.executable is None) != (self.model_store is None):
             raise ValueError('Owned runtime requires both executable and model store')
@@ -85,12 +89,15 @@ class ManagedOllamaRuntime:
             raise ValueError('Managed runtime requires explicit executable and model store')
         self.config = config
         self.process: subprocess.Popen | None = None
+        self._pid_inventory_valid = False
+        self._known_descendants: dict[int, str | None] = {}
+        self._job_handle = None
 
     def start(self) -> None:
         if self.process is not None:
             if self.process.poll() is None:
                 return  # The same owned Popen handle is already running.
-            self.process = None
+            self.stop()  # Reap the handle and close its job, including orphaned runners.
         executable = self.config.executable.resolve(strict=True)
         if executable.name.lower() != 'ollama.exe':
             raise ProbeFailure('probe_error')
@@ -109,10 +116,18 @@ class ManagedOllamaRuntime:
         self.process = subprocess.Popen([str(executable), 'serve'], stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
             env=env, creationflags=flags)
-        deadline = time.monotonic() + 10
+        if os.name == 'nt':
+            self._job_handle = _create_kill_on_close_job(self.process)
+            if self._job_handle is None:
+                if self.process.poll() is None:
+                    self.process.terminate()
+                self.process.wait(timeout=5)
+                self.process = None
+                raise ProbeFailure('unavailable')
+        deadline = time.monotonic() + self.config.startup_timeout_s
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
-                self.process = None
+                self.stop()
                 raise ProbeFailure('unavailable')
             try:
                 with httpx.Client(trust_env=False, follow_redirects=False,
@@ -129,53 +144,108 @@ class ManagedOllamaRuntime:
     def stop(self) -> bool:
         process = self.process
         if process is None:
-            return False
-        if os.name == 'nt' and process.poll() is None:
+            return True  # Idempotent stop: there is no owned runtime to stop.
+        if os.name == 'nt':
             # Ollama delegates GPU work to llama-server.exe. Stop only the
             # validated descendants of this owned process before its parent.
-            descendants = sorted(self.pids() - {process.pid}, reverse=True)
+            owned = self.pids()
+            if not self._pid_inventory_valid:
+                # Kernel job membership is an even stronger ownership proof
+                # than PID ancestry, so it remains safe to close this tree.
+                return self._close_owned_job_and_reap(process)
+            descendants = sorted(owned - {process.pid}, reverse=True)
             for pid in descendants:
-                if pid not in self.pids():
-                    continue
+                if pid not in self.pids() or not self._pid_inventory_valid:
+                    return self._close_owned_job_and_reap(process)
                 try:
-                    result = subprocess.run(['taskkill.exe', '/PID', str(pid), '/F'],
+                    # First ask the owned runner to close normally. Force is
+                    # limited to this PID after a fresh ancestry/path check.
+                    result = subprocess.run(['taskkill.exe', '/PID', str(pid)],
                         stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
                         check=False, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                 except (OSError, subprocess.SubprocessError):
-                    return False
-                if result.returncode != 0 and pid in self.pids():
-                    return False
+                    return self._close_owned_job_and_reap(process)
+                remaining = self.pids()
+                if not self._pid_inventory_valid:
+                    return self._close_owned_job_and_reap(process)
+                if pid in remaining:
+                    try:
+                        subprocess.run(['taskkill.exe', '/PID', str(pid), '/F'],
+                            stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
+                            check=False, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                    except (OSError, subprocess.SubprocessError):
+                        return self._close_owned_job_and_reap(process)
+                    if pid in self.pids():
+                        return self._close_owned_job_and_reap(process)
         if process.poll() is None:
             process.terminate()
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=self.config.shutdown_timeout_s)
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.wait(timeout=5)
+                process.wait(timeout=self.config.shutdown_timeout_s)
+        else:
+            # poll() observes/reaps exited children on CPython; wait makes the
+            # handle lifecycle explicit for all Process implementations.
+            process.wait(timeout=self.config.shutdown_timeout_s)
+        # The Job Object contains only this Popen process and descendants it
+        # creates. Closing it is the final orphan-safe cleanup boundary.
+        if self._job_handle is not None:
+            _close_job(self._job_handle)
+            self._job_handle = None
         self.process = None
+        return True
+
+    def _close_owned_job_and_reap(self, process) -> bool:
+        owned_job = self._job_handle
+        if owned_job is not None:
+            _close_job(owned_job)
+            self._job_handle = None
+        try:
+            if owned_job is None and process.poll() is None:
+                # Without a Job Object, only the Popen process handle is ours.
+                process.terminate()
+            process.wait(timeout=self.config.shutdown_timeout_s)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=self.config.shutdown_timeout_s)
+        finally:
+            self.process = None
         return True
 
     def pids(self) -> frozenset[int]:
         process = self.process
-        if process is None or process.poll() is not None:
+        if process is None:
+            self._pid_inventory_valid = True
             return frozenset()
-        pids = {process.pid}
+        process_alive = process.poll() is None
+        pids = {process.pid} if process_alive else set()
         if os.name != 'nt':
             return frozenset(pids)
         # Ollama may execute its GPU runner as a child process on Windows.
         script = ('Get-CimInstance Win32_Process | '
-                  'Select-Object ProcessId,ParentProcessId,ExecutablePath | ConvertTo-Json -Compress')
+                  'Select-Object ProcessId,ParentProcessId,ExecutablePath,CreationDate | ConvertTo-Json -Compress')
         try:
             result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
                 capture_output=True, timeout=5, check=True,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             if len(result.stdout) > 512 * 1024:
+                self._pid_inventory_valid = False
                 return frozenset(pids)
             rows = json.loads(result.stdout)
             rows = rows if isinstance(rows, list) else [rows]
+            self._pid_inventory_valid = True
             executable = self.config.executable.resolve()
             expected = {str(executable).casefold(),
                         str(executable.parent / 'lib' / 'ollama' / 'llama-server.exe').casefold()}
+            by_pid = {row.get('ProcessId'): row for row in rows if isinstance(row, dict)}
+            if not process_alive:
+                # Parent-crash recovery may clean only descendants recorded
+                # while the supervisor still observed its own live process.
+                pids = {pid for pid, creation in self._known_descendants.items()
+                        if (pid in by_pid and isinstance(by_pid[pid].get('ExecutablePath'), str)
+                            and by_pid[pid]['ExecutablePath'].casefold() in expected
+                            and by_pid[pid].get('CreationDate') == creation)}
             changed = True
             while changed:
                 before = len(pids)
@@ -184,10 +254,59 @@ class ManagedOllamaRuntime:
                             and isinstance(row.get('ExecutablePath'), str)
                             and row['ExecutablePath'].casefold() in expected):
                         pids.add(row['ProcessId'])
+                        if process_alive and row['ProcessId'] != process.pid:
+                            self._known_descendants[row['ProcessId']] = row.get('CreationDate')
                 changed = len(pids) != before
-        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
-            pass
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
+            self._pid_inventory_valid = False
         return frozenset(pids)
+
+
+def _create_kill_on_close_job(process: subprocess.Popen):
+    """Create a kernel-owned process tree boundary for this Ollama launch."""
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimit(ctypes.Structure):
+        _fields_ = [('PerProcessUserTimeLimit', ctypes.c_longlong),
+            ('PerJobUserTimeLimit', ctypes.c_longlong), ('LimitFlags', wintypes.DWORD),
+            ('MinimumWorkingSetSize', ctypes.c_size_t), ('MaximumWorkingSetSize', ctypes.c_size_t),
+            ('ActiveProcessLimit', wintypes.DWORD), ('Affinity', ctypes.c_size_t),
+            ('PriorityClass', wintypes.DWORD), ('SchedulingClass', wintypes.DWORD)]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [('ReadOperationCount', ctypes.c_ulonglong),
+            ('WriteOperationCount', ctypes.c_ulonglong), ('OtherOperationCount', ctypes.c_ulonglong),
+            ('ReadTransferCount', ctypes.c_ulonglong), ('WriteTransferCount', ctypes.c_ulonglong),
+            ('OtherTransferCount', ctypes.c_ulonglong)]
+
+    class ExtendedLimit(ctypes.Structure):
+        _fields_ = [('BasicLimitInformation', BasicLimit), ('IoInfo', IoCounters),
+            ('ProcessMemoryLimit', ctypes.c_size_t), ('JobMemoryLimit', ctypes.c_size_t),
+            ('PeakProcessMemoryUsed', ctypes.c_size_t), ('PeakJobMemoryUsed', ctypes.c_size_t)]
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+        ctypes.c_void_p, wintypes.DWORD]
+    kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    handle = kernel.CreateJobObjectW(None, None)
+    if not handle:
+        return None
+    info = ExtendedLimit()
+    info.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if (not kernel.SetInformationJobObject(handle, 9, ctypes.byref(info), ctypes.sizeof(info))
+            or not kernel.AssignProcessToJobObject(handle, process._handle)):
+        _close_job(handle)
+        return None
+    return handle
+
+
+def _close_job(handle) -> None:
+    import ctypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel.CloseHandle(handle)
 
 
 class OllamaQualificationHTTP:

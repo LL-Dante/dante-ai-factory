@@ -1,8 +1,9 @@
 # P7 — Node 0 qualification layer
 
-Status: the qualification **software layer** is tested with local fixtures. Node 0,
-RTX 5080, real Ollama/llama.cpp inference, CUDA and Vulkan remain **NOT YET QUALIFIED**.
-No benchmark numbers or compatibility verdicts are supplied for real hardware.
+Status: the qualification **software layer** is tested with local fixtures. Node 0's
+RTX 5080 / native Ollama / qwen3:4b path has passed physical qualification and a real
+local inference on the workstation. llama.cpp and Vulkan remain **NOT YET QUALIFIED**.
+The machine's qualification evidence is retained locally, not shipped with this source.
 
 ## Architecture and scope
 
@@ -212,9 +213,11 @@ without making a provider authoritative.
 
 ## Verification of this implementation
 
-On Windows with Python 3.12.13 and the existing declared environment, the full suite
-passed **284/284** tests: original P0–P6 **171**, P7 **82**, P8 **17**, hardening
-audits **14**, no skips.
+The historical P7/P8 implementation checkpoint below passed **284/284** tests at
+that commit. The current branch has since added the real Ollama qualification, physical
+Node 0 integration harness, and supervisor. Run the current full suite from the repo
+root using `python -m unittest discover -s tests -v`; the physical integration test
+remains skipped unless explicitly enabled.
 This is evidence for the reviewed working changes based on public commit
 `5de6869d8d4cfbf81a72b5df2eea31188d37ca23`, not qualification of physical Node 0.
 P7 coverage includes validation, multiple GPUs, selective invalidation, version

@@ -570,7 +570,10 @@ def install_user_startup(config_path: Path, *, repository: Path) -> str:
     action = (f'New-ScheduledTaskAction -Execute {ps_quote(pythonw)} '
               f'-Argument {ps_quote(arguments)} -WorkingDirectory {ps_quote(repository)}')
     trigger = r'New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"'
-    settings = 'New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable'
+    settings = ('New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew '
+        '-RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) '
+        '-ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable '
+        '-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -DontStopOnIdleEnd')
     principal = r'New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited'
     script = f"$ErrorActionPreference='Stop'; Register-ScheduledTask -TaskName {ps_quote(task_name)} -Action ({action}) -Trigger ({trigger}) -Settings ({settings}) -Principal ({principal}) -Force | Out-Null"
     subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],

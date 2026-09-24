@@ -313,6 +313,9 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn('AtLogOn',script)
         self.assertIn('MultipleInstances IgnoreNew',script)
         self.assertIn('RestartCount 3',script)
+        self.assertIn('DontStopOnIdleEnd',script)
+        self.assertIn('AllowStartIfOnBatteries',script)
+        self.assertIn('DontStopIfGoingOnBatteries',script)
         self.assertNotIn('token',script.lower())
 
     def test_snapshot_contains_no_prompt_or_runtime_response(self):

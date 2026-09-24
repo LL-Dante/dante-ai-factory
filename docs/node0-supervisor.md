@@ -65,11 +65,12 @@ Install or remove the current user's Task Scheduler entry without elevation:
 
 The task uses the repository `.venv` `pythonw.exe`, a direct repository entry
 script, an explicit working directory, interactive current-user logon, one
-instance, and bounded retry after process failure. Arguments contain paths only,
-not credentials. The OS mutex is released automatically when a crashed process
-exits; a duplicate instance exits without touching Ollama. The one-shot manual
-simulation validates the same entry code. A Windows reboot is still required to
-prove actual logon startup and reboot persistence.
+instance, bounded retry after process failure, and settings that keep the task
+running when the session becomes idle or power changes to battery. Arguments
+contain paths only, not credentials. The OS mutex is released automatically when
+a crashed process exits; a duplicate instance exits without touching Ollama. The
+one-shot manual simulation validates the same entry code. A Windows reboot is
+still required to prove actual logon startup and reboot persistence.
 
 All runtime, state, ledger, model and evidence paths are local to this Node 0
 configuration. Keep the private qualification config and evidence outside Git.

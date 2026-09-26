@@ -720,7 +720,7 @@ class BenchmarkAgentTests(unittest.TestCase):
         production = production_runtime()
         runtime = benchmark_runtime(tags=[tag(SMALL, SMALL_DIGEST, 2497293931)],
                                     shown={SMALL: show()})
-        agent = DanteBenchmarkAgent(models=(SMALL,), collector=None,
+        agent = DanteBenchmarkAgent(models=(SMALL,), collector=None, arena_factory=arena,
                                     runtime_factory=lambda endpoint: production if endpoint == PRODUCTION else runtime)
         inference = _inference(PRODUCTION)
         result = agent.execute(inference, _job(), self.definition, _payload(self.definition),
@@ -735,7 +735,7 @@ class BenchmarkAgentTests(unittest.TestCase):
         production = production_runtime()
         runtime = benchmark_runtime(tags=[tag(SMALL, SMALL_DIGEST, 2497293931)],
                                     shown={SMALL: show()})
-        agent = DanteBenchmarkAgent(models=(SMALL,),
+        agent = DanteBenchmarkAgent(models=(SMALL,), arena_factory=arena,
                                     runtime_factory=lambda endpoint: production if endpoint == PRODUCTION else runtime)
         result = agent.execute(_inference(PRODUCTION), _job(), self.definition,
                                _payload(self.definition), _spec(self.definition),
@@ -761,7 +761,7 @@ class BenchmarkAgentTests(unittest.TestCase):
                 return super().residency()
 
         runtime = Drifting(BENCH, tags=[tag(SMALL, SMALL_DIGEST, 2497293931)], shown={SMALL: show()})
-        agent = DanteBenchmarkAgent(models=(SMALL,),
+        agent = DanteBenchmarkAgent(models=(SMALL,), arena_factory=arena,
                                     runtime_factory=lambda endpoint: production if endpoint == PRODUCTION else runtime)
         with self.assertRaises(QualificationRejected):
             agent.execute(_inference(PRODUCTION), _job(), self.definition, _payload(self.definition),
@@ -788,7 +788,7 @@ class BenchmarkAgentTests(unittest.TestCase):
         production = production_runtime()
         runtime = benchmark_runtime(tags=[tag(SMALL, SMALL_DIGEST, 2497293931)],
                                     shown={SMALL: show()})
-        agent = DanteBenchmarkAgent(models=(SMALL,), collector=_Snapshot,
+        agent = DanteBenchmarkAgent(models=(SMALL,), collector=_Snapshot, arena_factory=arena,
             runtime_factory=lambda endpoint: production if endpoint == PRODUCTION else runtime)
         result = agent.execute(_inference(PRODUCTION), _job(), self.definition,
                                _payload(self.definition), _spec(self.definition),
@@ -804,7 +804,7 @@ class BenchmarkAgentTests(unittest.TestCase):
         production = production_runtime()
         runtime = benchmark_runtime(tags=[tag(SMALL, SMALL_DIGEST, 2497293931)],
                                     shown={SMALL: show()})
-        agent = DanteBenchmarkAgent(models=(SMALL,), collector=explode,
+        agent = DanteBenchmarkAgent(models=(SMALL,), collector=explode, arena_factory=arena,
             runtime_factory=lambda endpoint: production if endpoint == PRODUCTION else runtime)
         result = agent.execute(_inference(PRODUCTION), _job(), self.definition,
                                _payload(self.definition), _spec(self.definition),
@@ -838,7 +838,7 @@ class ControlCenterBenchmarkViewTests(unittest.TestCase):
         production = production_runtime()
         runtime = benchmark_runtime(tags=[tag(SMALL, SMALL_DIGEST, 2497293931)],
                                     shown={SMALL: show()})
-        agent = DanteBenchmarkAgent(models=(SMALL,),
+        agent = DanteBenchmarkAgent(models=(SMALL,), arena_factory=arena,
                                     runtime_factory=lambda endpoint: production if endpoint == PRODUCTION else runtime)
         definition = DanteBenchmarkAgent.definition(TARGET_MODEL)
         result = agent.execute(_inference(PRODUCTION), _job(), definition, _payload(definition),

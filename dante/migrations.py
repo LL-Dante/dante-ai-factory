@@ -64,7 +64,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             connection.execute('CREATE INDEX IF NOT EXISTS qualification_scope ON model_qualifications(scope,sequence)')
             connection.execute('PRAGMA user_version=4')
         if version < 5:
-            connection.execute('''CREATE TABLE workload_jobs (
+            connection.execute('''CREATE TABLE IF NOT EXISTS workload_jobs (
                 job_id TEXT PRIMARY KEY,
                 idempotency_key TEXT UNIQUE,
                 request_digest TEXT NOT NULL,
@@ -83,7 +83,7 @@ def migrate(connection: sqlite3.Connection) -> None:
                 result_json TEXT,
                 failure_json TEXT
             )''')
-            connection.execute('''CREATE TABLE workload_attempts (
+            connection.execute('''CREATE TABLE IF NOT EXISTS workload_attempts (
                 attempt_id TEXT PRIMARY KEY,
                 job_id TEXT NOT NULL REFERENCES workload_jobs(job_id),
                 attempt_number INTEGER NOT NULL,
@@ -95,7 +95,7 @@ def migrate(connection: sqlite3.Connection) -> None:
                 response_digest TEXT,
                 UNIQUE(job_id,attempt_number)
             )''')
-            connection.execute('''CREATE TABLE workload_events (
+            connection.execute('''CREATE TABLE IF NOT EXISTS workload_events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id TEXT NOT NULL REFERENCES workload_jobs(job_id),
                 attempt_id TEXT,
@@ -103,9 +103,9 @@ def migrate(connection: sqlite3.Connection) -> None:
                 timestamp_utc TEXT NOT NULL,
                 metadata TEXT NOT NULL
             )''')
-            connection.execute('CREATE INDEX workload_runnable ON workload_jobs(state,priority DESC,eligible_at,created_epoch,job_id)')
-            connection.execute('CREATE INDEX workload_history ON workload_attempts(job_id,attempt_number)')
-            connection.execute('''CREATE TABLE workload_control (
+            connection.execute('CREATE INDEX IF NOT EXISTS workload_runnable ON workload_jobs(state,priority DESC,eligible_at,created_epoch,job_id)')
+            connection.execute('CREATE INDEX IF NOT EXISTS workload_history ON workload_attempts(job_id,attempt_number)')
+            connection.execute('''CREATE TABLE IF NOT EXISTS workload_control (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 owner_id TEXT NOT NULL,
                 process_id INTEGER NOT NULL,

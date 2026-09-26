@@ -4,11 +4,13 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from dante.workload import (IdempotencyConflict, JobState, JobTransitionError, ModelRequirement,
     Node0InferenceExecutor, OrchestratorAlreadyRunning, WorkloadOrchestrator, WorkloadSpec, WorkloadStore)
@@ -193,12 +195,20 @@ class WorkloadStoreTests(unittest.TestCase):
         self.assertEqual(sum(item is not None for item in results), 1)
 
     def test_active_owner_prevents_duplicate_orchestrator(self):
+        if os.name == 'nt':
+            with patch('dante.workload.os.kill', side_effect=AssertionError('Windows liveness check must not call os.kill')):
+                self.assertTrue(WorkloadStore._process_alive(os.getpid()))
         first = WorkloadOrchestrator(self.store, FakeExecutor())
         first.start()
         second = WorkloadOrchestrator(WorkloadStore(self.db), FakeExecutor())
         with self.assertRaises(OrchestratorAlreadyRunning):
             second.start()
         first.stop()
+
+        self.store.acquire_owner('stale-owner', 0)
+        replacement = WorkloadOrchestrator(self.store, FakeExecutor(), worker_id='replacement-owner')
+        self.assertEqual(replacement.start(), [])
+        replacement.stop()
 
     def test_interrupted_running_attempt_is_retried_and_preserved(self):
         job = self.store.submit(spec())

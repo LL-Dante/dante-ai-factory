@@ -474,6 +474,43 @@ class WorkloadStore:
 
     @staticmethod
     def _process_alive(pid: int) -> bool:
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+
+            if pid <= 0:
+                return False
+
+            # On Windows CPython implements os.kill(pid, 0) via TerminateProcess.
+            # A zero-time wait on a synchronization handle checks liveness safely.
+            synchronize = 0x00100000
+            error_invalid_parameter = 87
+            wait_object_0 = 0
+            wait_timeout = 258
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            open_process = kernel32.OpenProcess
+            open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            open_process.restype = wintypes.HANDLE
+            wait_for_single_object = kernel32.WaitForSingleObject
+            wait_for_single_object.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            wait_for_single_object.restype = wintypes.DWORD
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = (wintypes.HANDLE,)
+            close_handle.restype = wintypes.BOOL
+
+            handle = open_process(synchronize, False, pid)
+            if not handle:
+                return ctypes.get_last_error() != error_invalid_parameter
+            try:
+                result = wait_for_single_object(handle, 0)
+                if result == wait_object_0:
+                    return False
+                if result == wait_timeout:
+                    return True
+                return True
+            finally:
+                close_handle(handle)
+
         try:
             os.kill(pid, 0)
             return True

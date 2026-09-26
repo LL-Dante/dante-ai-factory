@@ -382,7 +382,7 @@ class QualificationTests(unittest.TestCase):
         migrated = TaskLedger(self.path)
         self.assertEqual(migrated.get_task(task.task_id), task)
         with closing(migrated._connect()) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 5)
             for name, rows in before.items():
                 self.assertEqual(db.execute('SELECT * FROM "' + name + '"').fetchall(), rows)
         QualificationStore(TaskLedger(self.path)).append(record())

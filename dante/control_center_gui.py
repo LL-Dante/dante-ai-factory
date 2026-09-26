@@ -148,6 +148,20 @@ def job_label(job):
     return label, color
 
 
+def job_counts(jobs):
+    """Count queued and active jobs from existing records; no slot, ordering, or capacity inference."""
+    queued = active = 0
+    for job in jobs or []:
+        if not isinstance(job, dict):
+            continue
+        state = job.get("state")
+        if state == "queued":
+            queued += 1
+        elif state in {"running", "claimed", "retry_wait", "cancel_requested"}:
+            active += 1
+    return queued, active
+
+
 def job_phase(job, events=None):
     """Show a detailed phase only when durable state/event evidence supports it."""
     state = job.get("state")
@@ -396,6 +410,12 @@ class ControlCenterApp:
                 ("CPU / RAM", f"{cpu} / {ram}")]
         for title, value in vals:
             self._panel(metrics, title, value).pack(side="left", fill="x", expand=True, padx=(0, 9))
+
+        queued_count, active_count = job_counts(self.jobs)
+        counts = ttk.Frame(self.page)
+        counts.pack(fill="x", pady=(0, 12))
+        for title, value in (("Queued jobs", queued_count), ("Active jobs (running / claimed / retry / cancel)", active_count)):
+            self._panel(counts, title, str(value)).pack(side="left", fill="x", expand=True, padx=(0, 9))
 
         ttk.Label(self.page, text="ACTIVE WORK", style="PanelTitle.TLabel").pack(anchor="w", pady=(4, 7))
         if active:

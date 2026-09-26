@@ -10,6 +10,7 @@ from dante.control_center_gui import (
     format_count,
     elapsed_wall,
     job_label,
+    job_counts,
     job_details_text,
     job_phase,
     job_submission_text,
@@ -54,6 +55,19 @@ class ControlCenterGuiPresentationTests(unittest.TestCase):
         job = {"state": "succeeded", "created_at": "2026-09-26T10:00:00+00:00",
                "updated_at": "2026-09-26T10:09:04+00:00"}
         self.assertEqual(elapsed_wall(job), "00:09:04")
+
+    def test_job_counts_counts_queued_and_active_only(self):
+        jobs = [{"state": "queued"}, {"state": "running"}, {"state": "claimed"},
+                {"state": "retry_wait"}, {"state": "cancel_requested"},
+                {"state": "succeeded"}, {"state": "failed"}, {"state": "queued"}]
+        self.assertEqual(job_counts(jobs), (2, 4))
+
+    def test_job_counts_empty_input_is_zero(self):
+        self.assertEqual(job_counts([]), (0, 0))
+        self.assertEqual(job_counts(None), (0, 0))
+
+    def test_job_counts_ignores_malformed_records(self):
+        self.assertEqual(job_counts([None, "x", 42, {"state": "queued"}]), (1, 0))
 
     def test_job_details_keep_unreported_tokens_and_metrics_explicit(self):
         text = job_details_text({"job_id": "job-2", "state": "queued", "priority": 1})

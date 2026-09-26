@@ -193,7 +193,7 @@ class BenchmarkRuntime:
                     for line in response.iter_lines():
                         if not line:
                             continue
-                        raw.extend(line)
+                        raw.extend(line.encode('utf-8'))
                         if len(raw) > _MAX_RESPONSE or chunks >= _MAX_CHUNKS:
                             raise BenchmarkRuntimeError('Benchmark response exceeded the streaming limit')
                         chunks += 1

@@ -878,6 +878,106 @@ class ControlCenterBenchmarkViewTests(unittest.TestCase):
             benchmark_overview({'benchmark': None})
 
 
+class BenchmarkTransportTests(unittest.TestCase):
+    """Exercises the real HTTP path, including streaming decode.
+
+    A fake runtime cannot catch a decoding mistake in the streaming reader, so
+    every branch of `generate` is driven through a mock transport here.
+    """
+
+    def _runtime(self, handler):
+        import httpx
+        return BenchmarkRuntime(BENCH, transport=httpx.MockTransport(handler),
+                                adapter_factory=lambda _profile: FakeAdapter(None))
+
+    @staticmethod
+    def _ndjson(*messages):
+        return ''.join(json.dumps(item) + '\n' for item in messages).encode('utf-8')
+
+    def test_stream_is_decoded_and_counters_kept(self):
+        import httpx
+
+        def handler(request):
+            body = json.loads(request.content)
+            self_check.append(body)
+            return httpx.Response(200, content=self._ndjson(
+                {'response': 'Hel', 'done': False},
+                {'response': 'lo', 'done': False},
+                {'response': '', 'done': True, 'done_reason': 'length',
+                 'load_duration': 1_642_000_000, 'prompt_eval_count': 27,
+                 'prompt_eval_duration': 69_540_000, 'eval_count': 5,
+                 'eval_duration': 22_000_000, 'total_duration': 1_760_000_000}))
+
+        self_check: list = []
+        raw = self._runtime(handler).generate(SMALL, prompt='hi', parameters=benchmark_parameters())
+        self.assertEqual(raw.response, 'Hello')
+        self.assertEqual(raw.eval_count, 5)
+        self.assertEqual(raw.prompt_eval_count, 27)
+        self.assertEqual(raw.done_reason, 'length')
+        self.assertIsNotNone(raw.time_to_first_token_s)
+        self.assertEqual(raw.chunk_count, 3)
+        self.assertIs(self_check[0]['think'], False)
+        self.assertEqual(self_check[0]['options']['num_predict'], 48)
+
+    def test_stream_without_a_final_message_is_refused(self):
+        import httpx
+        def handler(_request):
+            return httpx.Response(200, content=self._ndjson({'response': 'x', 'done': False}))
+        with self.assertRaises(BenchmarkRuntimeError):
+            self._runtime(handler).generate(SMALL, prompt='hi', parameters=benchmark_parameters())
+
+    def test_malformed_json_line_is_refused(self):
+        import httpx
+        def handler(_request):
+            return httpx.Response(200, content=b'{not json\n')
+        with self.assertRaises(BenchmarkRuntimeError) as caught:
+            self._runtime(handler).generate(SMALL, prompt='hi', parameters=benchmark_parameters())
+        self.assertIn('malformed', str(caught.exception))
+
+    def test_error_envelope_is_refused(self):
+        import httpx
+        def handler(_request):
+            return httpx.Response(200, content=self._ndjson({'error': 'model not found'}))
+        with self.assertRaises(BenchmarkRuntimeError):
+            self._runtime(handler).generate(SMALL, prompt='hi', parameters=benchmark_parameters())
+
+    def test_non_200_is_refused(self):
+        import httpx
+        def handler(_request):
+            return httpx.Response(500, content=b'overloaded')
+        with self.assertRaises(BenchmarkRuntimeError) as caught:
+            self._runtime(handler).generate(SMALL, prompt='hi', parameters=benchmark_parameters())
+        self.assertIn('500', str(caught.exception))
+
+    def test_unload_confirms_residency_is_gone(self):
+        import httpx
+        state = {'resident': True}
+
+        class Unloading(FakeAdapter):
+            def loaded(self):
+                return ([{'name': SMALL, 'size_vram': 1, 'context_length': 4096}]
+                        if state['resident'] else [])
+
+        def handler(_request):
+            state['resident'] = False
+            return httpx.Response(200, content=b'{}')
+
+        runtime = BenchmarkRuntime(BENCH, transport=httpx.MockTransport(handler),
+                                   adapter_factory=lambda _profile: Unloading(None))
+        runtime.unload(SMALL)
+        self.assertFalse(state['resident'])
+
+    def test_unload_that_never_takes_effect_is_refused(self):
+        import httpx
+        runtime = BenchmarkRuntime(BENCH, transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, content=b'{}')),
+            adapter_factory=lambda _profile: FakeAdapter(
+                None, resident=[{'name': SMALL, 'size_vram': 1, 'context_length': 4096}]))
+        with self.assertRaises(BenchmarkRuntimeError) as caught:
+            runtime.unload(SMALL)
+        self.assertIn('still resident', str(caught.exception))
+
+
 class _Store:
     def __init__(self):
         self.events: list = []

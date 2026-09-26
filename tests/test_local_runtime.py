@@ -115,6 +115,43 @@ class LocalAdapterTests(unittest.TestCase):
         self.assertEqual(body['options']['num_predict'], DEFAULT_MAX_OUTPUT_TOKENS)
         self.assertNotIn('think', body)
 
+    def test_ordinary_inference_omits_format_entirely(self):
+        wire = Wire()
+        wire.adapter().complete(request())
+        wire.adapter().complete(request(thinking=ThinkingPolicy.OFF, max_output_tokens=64))
+        for path, body in wire.calls:
+            if path == '/api/chat':
+                self.assertNotIn('format', body)
+        self.assertIsNone(request().output_schema)
+
+    def test_agent_schema_is_sent_as_ollama_format(self):
+        schema = {'type': 'object', 'properties': {'summary': {'type': 'string'}},
+                  'required': ['summary'], 'additionalProperties': False}
+        wire = Wire()
+        wire.adapter().complete(request(output_schema=schema))
+        body = dict(wire.calls[-1][1])
+        self.assertEqual(wire.calls[-1][0], '/api/chat')
+        self.assertEqual(body['format'], schema)
+        self.assertEqual(body['model'], 'fixture:1')
+        self.assertEqual(body['stream'], False)
+
+    def test_ordinary_inference_after_a_schema_request_still_omits_format(self):
+        wire = Wire()
+        wire.adapter().complete(request(output_schema={'type': 'object'}))
+        wire.adapter().complete(request())
+        chats = [body for path, body in wire.calls if path == '/api/chat']
+        self.assertIn('format', chats[0])
+        self.assertNotIn('format', chats[-1])
+
+    def test_non_object_output_schema_is_rejected_before_any_request(self):
+        for schema in ([], 'json', {'type': 'string'}, {'properties': {}}):
+            with self.subTest(schema=schema):
+                with self.assertRaises(ValueError):
+                    request(output_schema=schema)
+        wire = Wire()
+        wire.adapter().complete(request(output_schema={'type': 'object'}))
+        self.assertEqual([path for path, _ in wire.calls if path == '/api/chat'], ['/api/chat'])
+
     def test_native_thinking_policy_is_capability_aware(self):
         capable = model(capabilities={'thinking'})
         for policy, expected in ((ThinkingPolicy.OFF, False), (ThinkingPolicy.ON, True)):

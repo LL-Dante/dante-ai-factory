@@ -14,7 +14,8 @@ from uuid import uuid4
 from dante.agent_runner import (AgentRegistry, AgentRunner,
     AgentUnavailable, DanteResearchAgent, Node0WorkloadExecutor, build_agent_registry,
     definition_digest)
-from dante.contracts.agents import AgentDefinition, AgentModelTarget, AgentTaskPayload
+from dante.contracts.agents import (AgentDefinition, AgentModelTarget, AgentTaskPayload,
+                                    ResearchDraft)
 from dante.inference import InferenceCancelled, InferenceTimeout
 from dante.node0_control import (ControlError, Node0ControlClient, Node0ControlServer,
     Node0ControlService)
@@ -22,6 +23,7 @@ from dante.node0_cli import main as node0_cli_main
 from dante.telemetry import JsonlAudit
 from dante.workload import (ExecutionResult, JobState, ModelRequirement,
     WorkloadOrchestrator, WorkloadSpec, WorkloadStore)
+from pydantic import ValidationError
 
 
 DIGEST = '359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7'
@@ -486,6 +488,115 @@ class AgentStructuredOutputTests(AgentFixture):
         self.assertEqual(result['qualification_id'], QUALIFICATION)
         self.assertEqual(result['model'], MODEL_ID)
         self.assertFalse(saved.result['fallback'])
+
+
+class AgentSchemaConstrainedDecodingTests(AgentFixture):
+    """The agent path must carry a decoding constraint, not just prompt wording."""
+
+    def setUp(self):
+        super().setUp()
+        self.local = SequencedInference(VALID_DRAFT)
+        self.runner = AgentRunner(self.registry, self.local, self.store)
+        self.executor = Node0WorkloadExecutor(self.local, self.runner)
+
+    def run_with(self, *responses):
+        self.local.responses = list(responses)
+        record = self.submit(maximum_attempts=1)
+        orchestrator = self.orchestrator()
+        try:
+            orchestrator.start()
+            orchestrator.run_once()
+        finally:
+            orchestrator.stop()
+        saved = self.store.get(str(record.job_id))
+        return saved, [event['event'] for event in self.store.events(str(record.job_id))]
+
+    def test_agent_request_carries_the_research_draft_schema(self):
+        self.run_with(VALID_DRAFT)
+        self.assertEqual(len(self.local.calls), 1)
+        schema = self.local.calls[0].output_schema
+        self.assertIsInstance(schema, dict)
+        self.assertEqual(schema, DanteResearchAgent.draft_json_schema())
+        self.assertEqual(schema['type'], 'object')
+
+    def test_repair_request_carries_the_identical_schema(self):
+        self.run_with('not-json', VALID_DRAFT)
+        self.assertEqual(len(self.local.calls), 2)
+        first, repair = self.local.calls
+        self.assertIsNotNone(repair.output_schema)
+        self.assertEqual(repair.output_schema, first.output_schema)
+
+    def test_one_repair_maximum_still_holds_under_the_schema(self):
+        saved, events = self.run_with('nope', 'nope', VALID_DRAFT)
+        self.assertEqual(saved.state, JobState.FAILED)
+        self.assertIsNone(saved.result)
+        self.assertEqual(len(self.local.calls), 2)
+        self.assertTrue(all(call.output_schema is not None for call in self.local.calls))
+        self.assertEqual(events.count('agent.output.repair.started'), 1)
+        self.assertIn('agent.output.repair.failed', events)
+
+    def test_ordinary_workload_spec_carries_no_schema(self):
+        spec = agent_spec(self.definition)
+        self.assertIsNone(spec.output_schema)
+        self.local.execute(spec, threading.Event())
+        self.assertIsNone(self.local.calls[-1].output_schema)
+
+    def test_schema_is_exactly_compatible_with_research_draft(self):
+        schema = DanteResearchAgent.draft_json_schema()
+        fields = set(ResearchDraft.model_fields)
+        self.assertEqual(set(schema['properties']), fields)
+        required = {name for name, f in ResearchDraft.model_fields.items() if f.is_required()}
+        self.assertEqual(set(schema['required']), required)
+        self.assertIs(schema['additionalProperties'], False)
+        for name, fragment in schema['properties'].items():
+            field = ResearchDraft.model_fields[name]
+            self.assertEqual(fragment['type'], 'array' if field.annotation is not str else 'string')
+        self.assertNotIn('$defs', json.dumps(schema))
+        self.assertNotIn('title', json.dumps(schema))
+        valid = {'summary': 's', 'findings': ['f'], 'recommended_next_actions': ['a']}
+        # limitations is optional in the schema, so it defaults exactly as the
+        # contract declares.
+        self.assertEqual(ResearchDraft.model_validate(valid).model_dump(mode='json'),
+                         {**valid, 'limitations': []})
+        self.assertNotIn('limitations', schema['required'])
+        with self.assertRaises(ValidationError):
+            ResearchDraft.model_validate({**valid, 'unexpected': 1})
+
+    def test_constrained_response_validates_and_persists(self):
+        payload = json.dumps({'summary': 'Fail-closed admission is enforced.',
+                              'findings': ['Admission is denied on stale or unknown backend state.'],
+                              'recommended_next_actions': ['Keep the gate closed by default.'],
+                              'limitations': ['Single qualified runtime observed.']})
+        saved, events = self.run_with(payload)
+        self.assertEqual(saved.state, JobState.SUCCEEDED)
+        self.assertEqual(saved.result['structured_result']['summary'], 'Fail-closed admission is enforced.')
+        self.assertNotIn('agent.output.invalid', events)
+        self.assertNotIn('agent.output.repair.started', events)
+        self.assertEqual(len(self.local.calls), 1)
+
+    def test_schema_constrained_reply_still_fails_closed_when_invalid(self):
+        empty_findings = json.dumps({'summary': 's', 'findings': [],
+                                     'recommended_next_actions': ['a']})
+        saved, events = self.run_with(empty_findings, empty_findings)
+        self.assertEqual(saved.state, JobState.FAILED)
+        self.assertIsNone(saved.result)
+        self.assertIn('agent.output.invalid', events)
+        self.assertIn('agent.output.repair.failed', events)
+
+    def test_qualification_and_local_only_route_unchanged_by_the_schema(self):
+        saved, _ = self.run_with(VALID_DRAFT)
+        self.assertEqual(saved.state, JobState.SUCCEEDED)
+        for call in self.local.calls:
+            self.assertEqual(call.model.model_id, MODEL_ID)
+            self.assertEqual(call.model.digest_sha256, DIGEST)
+            self.assertEqual(call.model.runtime_reference, RUNTIME)
+            self.assertTrue(call.model.local_only)
+        result = saved.result['structured_result']
+        self.assertEqual(result['qualification_id'], QUALIFICATION)
+        self.assertEqual(result['model'], MODEL_ID)
+        self.assertEqual(result['agent_id'], 'dante-research')
+        self.assertEqual(saved.result['fallback'], False)
+        self.assertEqual(saved.result['metadata']['gpu_identity'], GPU)
 
 
 class AgentControlPlaneTests(AgentFixture):

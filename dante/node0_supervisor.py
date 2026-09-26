@@ -37,6 +37,10 @@ from dante.recovery import digest
 from dante.telemetry import JsonlAudit
 
 
+# Bounded ceiling for an operator-supplied structured-output schema.
+MAX_OUTPUT_SCHEMA_BYTES = 8192
+
+
 class SupervisorConfig(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True)
     node_uuid: UUID
@@ -743,6 +747,7 @@ class Node0Supervisor:
     def infer(self, prompt: str, *, model_reference: str | None = None,
               context_tokens: int | None = None, max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
               thinking: ThinkingPolicy = ThinkingPolicy.OFF,
+              output_schema: dict | None = None,
               cancellation=None):
         if model_reference is not None and model_reference != self.config.qualification.model_reference:
             raise ValueError('Requested model differs from the configured Node 0 model')
@@ -759,6 +764,11 @@ class Node0Supervisor:
         if (isinstance(context_tokens, bool) or not isinstance(context_tokens, int)
                 or not 1 <= context_tokens <= self.config.qualification.context_tokens):
             raise ValueError('Requested context exceeds Node 0 qualification')
+        if output_schema is not None:
+            # Bounded, object-only schema; validated again by InferenceRequest.
+            if (not isinstance(output_schema, dict) or output_schema.get('type') != 'object'
+                    or len(json.dumps(output_schema, allow_nan=False)) > MAX_OUTPUT_SCHEMA_BYTES):
+                raise ValueError('Invalid structured output schema')
         if not self._inference_lock.acquire(blocking=False):
             raise Node0InferenceBusy('Node 0 inference is busy')
         task = None
@@ -779,7 +789,7 @@ class Node0Supervisor:
             with context:
                 response = self.node.host.infer(task.task_id, prompt, set(),
                     required_context_tokens=context_tokens, max_output_tokens=max_output_tokens,
-                    thinking=thinking)
+                    thinking=thinking, output_schema=output_schema)
             if not response.content.strip():
                 raise ValueError('Local inference returned an empty response')
             self.node.host.complete(task.task_id)

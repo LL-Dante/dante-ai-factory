@@ -207,7 +207,8 @@ class ContinuityManager:
         return ContinuityOutcome(disposition, reason, response, retry_at, diagnostic)
 
     def infer(self, task, privacy, messages, capabilities, *, tools=(), context_tokens=None,
-              max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS, thinking=ThinkingPolicy.OFF):
+              max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS, thinking=ThinkingPolicy.OFF,
+              output_schema=None):
         if context_tokens is not None and (isinstance(context_tokens, bool) or not isinstance(context_tokens, int) or context_tokens <= 0):
             return self._outcome(task, Disposition.TERMINAL, 'invalid_request')
         excluded = {}
@@ -268,7 +269,8 @@ class ContinuityManager:
             try:
                 response = self.gateway.infer_once(decision, InferenceRequest(model=selected, messages=messages,
                     tools=tools, task_id=task.task_id, trace_id=task.trace_id,
-                    max_output_tokens=max_output_tokens, thinking=thinking))
+                    max_output_tokens=max_output_tokens, thinking=thinking,
+                    output_schema=output_schema))
             except InferenceError as exc:
                 reason, state, retry = classify(exc)
                 last_diagnostic = exc.diagnostic if isinstance(exc.diagnostic, dict) else last_diagnostic

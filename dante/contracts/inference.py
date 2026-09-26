@@ -77,8 +77,19 @@ class InferenceRequest(StrictModel):
     temperature: float = Field(default=0, ge=0, le=2, allow_inf_nan=False)
     max_output_tokens: int = Field(default=DEFAULT_MAX_OUTPUT_TOKENS, ge=1, le=MAX_OUTPUT_TOKENS)
     thinking: ThinkingPolicy = ThinkingPolicy.OFF
+    # Optional provider-independent JSON Schema the runtime may use to constrain
+    # decoding. Absent means unconstrained, so ordinary inference is unchanged.
+    output_schema: dict[str, JsonValue] | None = None
     task_id: str | None = None
     trace_id: str | None = None
+
+    @model_validator(mode='after')
+    def bounded_output_schema(self):
+        if self.output_schema is not None:
+            if self.output_schema.get('type') != 'object':
+                raise ValueError('Output schema must describe an object')
+            json.dumps(self.output_schema, allow_nan=False)
+        return self
 
     @model_validator(mode='after')
     def continuation_ids(self):

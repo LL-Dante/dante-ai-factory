@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import threading
-from typing import Protocol
+from typing import Any, Protocol
 
 from dante.contracts.agents import AgentDefinition, AgentModelTarget, AgentResult, AgentTaskPayload, ResearchDraft
 from dante.contracts.inference import ThinkingPolicy
@@ -28,6 +28,26 @@ class AgentOutputInvalid(ValueError):
 REPAIR_ECHO_CHARS = 2000
 # A bare JSON object, optionally wrapped in exactly one markdown JSON/code fence.
 _JSON_OBJECT = re.compile(r'\A```(?:json)?[ \t]*\r?\n(?P<body>.*?)\r?\n?```\Z', re.DOTALL)
+# Annotation-only keys: harmless to a JSON validator, noise for a grammar compiler.
+_SCHEMA_DESCRIPTIVE_KEYS = frozenset({'title', 'description', 'default', 'examples'})
+
+
+def _schema_node(node: Any, defs: dict[str, Any], depth: int = 0) -> Any:
+    """Return a constrained-decoding-safe copy of a JSON Schema fragment."""
+    if depth > 12:
+        raise ValueError('Output schema nesting is too deep')
+    if isinstance(node, list):
+        return [_schema_node(item, defs, depth + 1) for item in node]
+    if not isinstance(node, dict):
+        return node
+    if '$ref' in node:
+        target = node['$ref'].removeprefix('#/$defs/')
+        if target not in defs:
+            raise ValueError('Output schema contains an unresolved reference')
+        return _schema_node(defs[target], defs, depth + 1)
+    return {key: _schema_node(value, defs, depth + 1)
+            for key, value in node.items()
+            if key not in _SCHEMA_DESCRIPTIVE_KEYS and key != '$defs'}
 
 
 class AgentImplementation(Protocol):
@@ -104,10 +124,12 @@ class DanteResearchAgent:
             raise InferenceCancelled('Agent execution cancelled')
         started = datetime.now(timezone.utc)
         prompt = self._prompt(definition, payload)
+        schema = self.draft_json_schema()
         request = spec.model_copy(update={
             'prompt': prompt,
             'thinking': definition.thinking,
             'max_output_tokens': min(spec.max_output_tokens, definition.output_token_budget),
+            'output_schema': schema,
         })
         emit('agent.inference.started', model_id=definition.model_target.model_id,
              output_tokens=request.max_output_tokens)
@@ -120,13 +142,14 @@ class DanteResearchAgent:
         draft = self._parse_draft(response.text)
         if draft is None:
             emit('agent.output.invalid', response_bytes=len(response.text.encode('utf-8')))
-            # Exactly one bounded repair over the same qualified local route. The
-            # schema is restated and only JSON is requested; a second failure is
-            # terminal, so a malformed reply can never loop.
+            # Exactly one bounded repair over the same qualified local route, under
+            # the identical schema constraint. A second failure is terminal, so a
+            # malformed reply can never loop.
             repair = spec.model_copy(update={
                 'prompt': self._repair_prompt(response.text),
                 'thinking': ThinkingPolicy.OFF,
                 'max_output_tokens': definition.output_token_budget,
+                'output_schema': schema,
             })
             emit('agent.output.repair.started', output_tokens=repair.max_output_tokens)
             repaired = inference.execute(repair, cancellation)
@@ -171,6 +194,21 @@ class DanteResearchAgent:
             },
             structured_result=structured,
         )
+
+    @staticmethod
+    def draft_json_schema() -> dict[str, Any]:
+        """The ResearchDraft JSON Schema sent to Ollama as a decoding constraint.
+
+        Derived from the contract itself, so the constrained decoding can never drift
+        from what ResearchDraft validation later enforces. Keys Ollama needs for
+        constrained decoding are preserved; descriptive-only keys are dropped.
+        """
+        schema = ResearchDraft.model_json_schema()
+        json.dumps(schema, allow_nan=False)
+        research = _schema_node(schema, schema.get('$defs', {}))
+        if not isinstance(research, dict) or research.get('type') != 'object':
+            raise ValueError('ResearchDraft schema must describe an object')
+        return research
 
     @classmethod
     def _parse_draft(cls, text):

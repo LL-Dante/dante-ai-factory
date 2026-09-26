@@ -322,6 +322,10 @@ class OllamaAdapter(LocalRuntimeAdapter):
             body['think'] = request.thinking == ThinkingPolicy.ON
         if request.tools:
             body['tools'] = [{'type': 'function', 'function': tool.model_dump()} for tool in request.tools]
+        # JSON-schema constrained decoding. Only agent work carries a schema;
+        # every ordinary inference request omits "format" entirely.
+        if request.output_schema is not None:
+            body['format'] = request.output_schema
         payload = self._json('/api/chat', body, cancellation=cancellation)
         if payload.get('done') is not True:
             _invalid_ollama_response(payload, 'generation_not_complete', 'done', 'true',

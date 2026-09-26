@@ -107,6 +107,7 @@ class WorkloadSpec(StrictModel):
     temperature: float = Field(default=0, ge=0, le=2, allow_inf_nan=False)
     max_output_tokens: int = Field(default=128, ge=1, le=2048)
     thinking: ThinkingPolicy = ThinkingPolicy.OFF
+    output_schema: dict[str, Any] | None = None
     priority: int = Field(default=0, ge=-100, le=100)
     timeout_s: float = Field(default=120, gt=0, le=3600, allow_inf_nan=False)
     deadline_at: datetime | None = None
@@ -633,7 +634,7 @@ class Node0InferenceExecutor:
             raise QualificationRejected('Requested model identity differs from configured qualified model')
         response = self.supervisor.infer(spec.prompt, model_reference=metadata.runtime_reference,
             context_tokens=metadata.context_tokens, max_output_tokens=spec.max_output_tokens,
-            thinking=spec.thinking,
+            thinking=spec.thinking, output_schema=spec.output_schema,
             cancellation=cancellation)
         if cancellation.is_set():
             raise InferenceCancelled('Local inference cancelled')

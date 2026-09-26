@@ -36,7 +36,8 @@ class AgentHostFoundation:
     def infer(self, task_id: str, content: str, capabilities: set[str], *, tools: tuple[ToolDefinition, ...] = (),
               required_context_tokens: int | None = None,
               max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
-              thinking: ThinkingPolicy = ThinkingPolicy.OFF) -> InferenceResult:
+              thinking: ThinkingPolicy = ThinkingPolicy.OFF,
+              output_schema: dict | None = None) -> InferenceResult:
         task = self.ledger.get_task(task_id)
         trace = TraceContext.create(task.task_id, task.trace_id)
         token = use_trace(trace)
@@ -49,7 +50,8 @@ class AgentHostFoundation:
                 from dante.continuity import ContinuitySignal, Disposition
                 outcome = self.continuity.infer(task, privacy, [{'role': 'user', 'content': content}],
                     capabilities, tools=tools, context_tokens=required_context_tokens,
-                    max_output_tokens=max_output_tokens, thinking=thinking)
+                    max_output_tokens=max_output_tokens, thinking=thinking,
+                    output_schema=output_schema)
                 if outcome.disposition != Disposition.CONTINUE_NOW:
                     raise ContinuitySignal(outcome)
                 return outcome.response
@@ -58,7 +60,8 @@ class AgentHostFoundation:
             return self.gateway.infer(decision, InferenceRequest(
                 model=decision.selected_model, messages=[{"role": "user", "content": content}],
                 tools=tools, task_id=task.task_id, trace_id=task.trace_id,
-                max_output_tokens=max_output_tokens, thinking=thinking))
+                max_output_tokens=max_output_tokens, thinking=thinking,
+                output_schema=output_schema))
         finally:
             reset_trace(token)
 

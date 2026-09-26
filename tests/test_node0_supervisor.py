@@ -341,6 +341,9 @@ class SupervisorTests(unittest.TestCase):
         supervisor, _ = build(self.root)
         self.assertTrue(supervisor.start())
         continuity = supervisor.node.continuity
+        # Startup already recorded a trusted observation from its own successful
+        # runtime probe; this test covers writes made once the request is issued.
+        continuity.calls.clear()
 
         def failed_inference(*_args, **_kwargs):
             self.assertEqual(continuity.calls, [])
@@ -376,6 +379,83 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(ollama['cooldown_until'], cooldown)
         self.assertFalse(ollama['route_admissible'])
         self.assertEqual(ollama['denial_reason'], 'cooldown')
+
+    def test_successful_runtime_health_refreshes_continuity_observation(self):
+        supervisor, _ = build(self.root)
+        self.assertTrue(supervisor.start())
+        continuity = supervisor.node.continuity
+        continuity.calls.clear()
+
+        self.assertTrue(supervisor.health_check())
+
+        self.assertEqual([call[1] for call in continuity.calls], [BackendState.AVAILABLE])
+        self.assertEqual(continuity.observations['ollama']['state'], BackendState.AVAILABLE)
+        self.assertEqual(continuity.calls[0][0], supervisor.config.model.provider_id)
+
+    def test_failed_runtime_health_never_marks_provider_available(self):
+        supervisor, _ = build(self.root)
+        self.assertTrue(supervisor.start())
+        continuity = supervisor.node.continuity
+        continuity.calls.clear()
+        continuity.observations.clear()
+        supervisor.http.fail = True
+
+        with self.assertRaises(ProbeFailure):
+            supervisor.health_check()
+
+        self.assertEqual(continuity.calls, [])
+        self.assertEqual(continuity.observations, {})
+
+    def test_stale_observation_is_admissible_only_after_genuine_runtime_health(self):
+        from dante.continuity import ContinuityManager
+        from dante.contracts.continuity import ContinuityPolicy
+        from dante.inference import DeterministicFreeAdapter, InferenceGateway
+        from dante.ledger import TaskLedger
+        from dante.registry import ModelRegistry
+        from dante.routing import RuleBasedRouter
+        policy = ContinuityPolicy()
+        supervisor, _ = build(self.root)
+        self.assertTrue(supervisor.start())
+        now = [time.time()]
+        registry = ModelRegistry([model()])
+        continuity = ContinuityManager(TaskLedger(self.root/'continuity-ledger.db'),
+            RuleBasedRouter(registry), InferenceGateway(registry, [DeterministicFreeAdapter('ollama')]),
+            policy, clock=lambda: now[0])
+        supervisor.node.continuity = continuity
+
+        def admissibility():
+            entry = continuity.read_only_status(context_tokens=4096)[0]
+            return entry['route_admissible'], entry['denial_reason']
+
+        continuity.observe('ollama', BackendState.AVAILABLE)
+        self.assertEqual(admissibility(), (True, None))
+
+        # Age the observation past the freshness TTL, as happens across a restart gap.
+        now[0] += policy.observation_ttl_s + 1
+        self.assertEqual(admissibility(), (False, 'health_unavailable_or_stale'))
+
+        # A failing probe must never make a stale route admissible.
+        supervisor.http.fail = True
+        with self.assertRaises(ProbeFailure):
+            supervisor.health_check()
+        self.assertEqual(admissibility(), (False, 'health_unavailable_or_stale'))
+
+        # Only a genuine successful probe refreshes the observation.
+        supervisor.http.fail = False
+        now[0] = time.time()
+        self.assertTrue(supervisor.health_check())
+        self.assertEqual(admissibility(), (True, None))
+
+    def test_failed_requalification_never_refreshes_continuity(self):
+        supervisor, _ = build(self.root, state=QualificationState.STALE)
+        supervisor.node.force_qualification_failure = True
+
+        self.assertFalse(supervisor.start())
+
+        self.assertEqual(supervisor.node.continuity.calls, [])
+        self.assertEqual(supervisor.node.continuity.observations, {})
+        self.assertFalse(supervisor._ready)
+        self.assertNotEqual(supervisor.state, 'QUALIFIED')
 
     def test_duplicate_instance_exits_without_touching_runtime(self):
         class HeldLock(FakeLock):

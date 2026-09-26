@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dante.contracts import ModelRef, PrivacyClass
 from dante.contracts.inference import DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS, ThinkingPolicy
-from dante.contracts.continuity import ContinuityPolicy, ExecutionPolicy
+from dante.contracts.continuity import BackendState, ContinuityPolicy, ExecutionPolicy
 from dante.contracts.qualification import (
     QualificationIdentity, QualificationState, RuntimeObservation,
 )
@@ -398,6 +398,17 @@ class Node0Supervisor:
             raise ProbeFailure('assertion_failed')
         return identity
 
+    def _observe_runtime_available(self) -> None:
+        # Only reached after a successful exact-runtime probe: the owned local
+        # runtime answered and still serves the qualified identity. That is trusted
+        # health input, so it refreshes the observation TTL and keeps routing from
+        # failing closed on a stale observation. No failure path calls this, and a
+        # write error is audited instead of being promoted to readiness.
+        try:
+            self.node.continuity.observe(self.config.model.provider_id, BackendState.AVAILABLE)
+        except Exception as exc:
+            self.audit.write('node0.continuity.observe.failed', error_type=type(exc).__name__)
+
     def _trust_or_requalify(self, identity: QualificationIdentity) -> bool:
         self._ready = False
         self._transition('VERIFYING')
@@ -414,6 +425,7 @@ class Node0Supervisor:
             self._transition('QUALIFIED')
             self.audit.write('node0.qualification.verified', qualification_id=self.qualification_id,
                              identity=identity.fingerprint, reused=True)
+            self._observe_runtime_available()
             return True
         self._transition('REQUALIFYING', reason=assessment.state.value)
         self.audit.write('node0.qualification.requalification.started', reason=assessment.state.value)
@@ -441,6 +453,7 @@ class Node0Supervisor:
         self._transition('QUALIFIED')
         self.audit.write('node0.qualification.requalification.completed', state='qualified',
                          qualification_id=self.qualification_id)
+        self._observe_runtime_available()
         return True
 
     def start(self) -> bool:

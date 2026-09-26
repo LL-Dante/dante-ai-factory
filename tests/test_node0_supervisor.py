@@ -457,6 +457,53 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(supervisor._ready)
         self.assertNotEqual(supervisor.state, 'QUALIFIED')
 
+    def test_successful_recheck_never_advertises_ready_false(self):
+        supervisor, _ = build(self.root)
+        self.assertTrue(supervisor.start())
+
+        original = supervisor._trust_or_requalify
+        seen = []
+        def observing(identity, **kwargs):
+            # A status read taken while a recheck is in flight must still see ready.
+            seen.append((supervisor.operator_status()['ready_for_local_routing'],
+                         supervisor.state))
+            return original(identity, **kwargs)
+        supervisor._trust_or_requalify = observing
+
+        self.assertTrue(supervisor.health_check())
+
+        self.assertEqual(seen, [(True, 'QUALIFIED')])
+        self.assertTrue(supervisor._ready)
+        self.assertEqual(supervisor.state, 'QUALIFIED')
+
+    def test_recheck_state_transitions_do_not_churn_audited_readiness(self):
+        supervisor, _ = build(self.root)
+        self.assertTrue(supervisor.start())
+        before = [line for line in supervisor.audit.path.read_text(encoding='utf-8').splitlines()
+                  if 'routing.readiness' in line]
+
+        self.assertTrue(supervisor.health_check())
+        self.assertTrue(supervisor.health_check())
+
+        after = [line for line in supervisor.audit.path.read_text(encoding='utf-8').splitlines()
+                 if 'routing.readiness' in line]
+        self.assertEqual(before, after)
+
+    def test_failed_recheck_still_revokes_readiness(self):
+        supervisor, _ = build(self.root)
+        self.assertTrue(supervisor.start())
+        supervisor.http.fail = True
+
+        with self.assertRaises(ProbeFailure):
+            supervisor.health_check()
+        # serve() reacts to a failed check by running bounded recovery, which is
+        # what actually revokes readiness; a mere in-flight check must not.
+        self.assertFalse(supervisor.recover_once())
+
+        self.assertFalse(supervisor._ready)
+        self.assertFalse(supervisor.runtime_healthy)
+        self.assertNotEqual(supervisor.state, 'QUALIFIED')
+
     def test_duplicate_instance_exits_without_touching_runtime(self):
         class HeldLock(FakeLock):
             def acquire(self): return False

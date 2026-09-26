@@ -377,6 +377,117 @@ class AgentExecutionTests(AgentFixture):
             self.executor.execute(agent_spec(self.definition), threading.Event())
 
 
+class SequencedInference(FakeLocalInference):
+    def __init__(self, *responses):
+        super().__init__()
+        self.responses = list(responses)
+    def execute(self, spec, cancellation):
+        self.calls.append(spec)
+        self.started.set()
+        index = min(len(self.calls) - 1, len(self.responses) - 1)
+        return ExecutionResult(self.responses[index], MODEL_ID, 'ollama', False, 'ollama', {
+            'qualification_id': QUALIFICATION, 'gpu_identity': GPU, 'gpu_vram_bytes': 1024,
+            'runtime_version': '0.34.4', 'context_tokens': 4096})
+
+
+class AgentStructuredOutputTests(AgentFixture):
+    def setUp(self):
+        super().setUp()
+        self.local = SequencedInference(VALID_DRAFT)
+        self.runner = AgentRunner(self.registry, self.local, self.store)
+        self.executor = Node0WorkloadExecutor(self.local, self.runner)
+
+    def run_with(self, *responses):
+        self.local.responses = list(responses)
+        record = self.submit(maximum_attempts=1)
+        orchestrator = self.orchestrator()
+        try:
+            orchestrator.start()
+            orchestrator.run_once()
+        finally:
+            orchestrator.stop()
+        saved = self.store.get(str(record.job_id))
+        return saved, [event['event'] for event in self.store.events(str(record.job_id))]
+
+    def test_direct_valid_json_is_accepted_without_repair(self):
+        saved, events = self.run_with(VALID_DRAFT)
+        self.assertEqual(saved.state, JobState.SUCCEEDED)
+        self.assertEqual(saved.result['structured_result']['summary'], 'Three priorities are clear.')
+        self.assertEqual(len(self.local.calls), 1)
+        self.assertNotIn('agent.output.repair.started', events)
+
+    def test_fenced_valid_json_is_accepted_without_repair(self):
+        saved, events = self.run_with('```json\n' + VALID_DRAFT + '\n```')
+        self.assertEqual(saved.state, JobState.SUCCEEDED)
+        self.assertEqual(len(self.local.calls), 1)
+        self.assertNotIn('agent.output.invalid', events)
+
+    def test_bare_fence_and_surrounding_whitespace_are_accepted(self):
+        saved, _ = self.run_with('\n  ```\n' + VALID_DRAFT + '\n```  \n')
+        self.assertEqual(saved.state, JobState.SUCCEEDED)
+        self.assertEqual(len(self.local.calls), 1)
+
+    def test_prose_wrapped_json_is_rejected_then_repaired_once(self):
+        saved, events = self.run_with('Here is the report:\n' + VALID_DRAFT, VALID_DRAFT)
+        self.assertEqual(saved.state, JobState.SUCCEEDED)
+        self.assertEqual(len(self.local.calls), 2)
+        self.assertIn('agent.output.invalid', events)
+        self.assertIn('agent.output.repair.started', events)
+        self.assertIn('agent.output.repair.completed', events)
+
+    def test_multiple_fences_are_not_accepted(self):
+        doubled = '```json\n' + VALID_DRAFT + '\n```\nand also\n```json\n' + VALID_DRAFT + '\n```'
+        saved, _ = self.run_with(doubled, VALID_DRAFT)
+        self.assertEqual(saved.state, JobState.SUCCEEDED)
+        self.assertEqual(len(self.local.calls), 2)
+
+    def test_malformed_json_fails_closed_after_one_repair(self):
+        saved, events = self.run_with('not-json', 'still not json')
+        self.assertEqual(saved.state, JobState.FAILED)
+        self.assertIsNone(saved.result)
+        self.assertIn('agent.output.repair.failed', events)
+        self.assertEqual(len(self.local.calls), 2)
+
+    def test_schema_invalid_json_fails_closed_after_one_repair(self):
+        bad = json.dumps({'summary': 'ok', 'findings': [], 'recommended_next_actions': ['a'],
+            'limitations': []})
+        saved, _ = self.run_with(bad, bad)
+        self.assertEqual(saved.state, JobState.FAILED)
+        self.assertIsNone(saved.result)
+        self.assertEqual(len(self.local.calls), 2)
+
+    def test_schema_rejects_unknown_fields(self):
+        bad = json.dumps({'summary': 'ok', 'findings': ['a'], 'recommended_next_actions': ['b'],
+            'limitations': [], 'shell_command': 'whoami'})
+        saved, _ = self.run_with(bad, bad)
+        self.assertEqual(saved.state, JobState.FAILED)
+        self.assertIsNone(saved.result)
+
+    def test_repair_never_runs_more_than_once(self):
+        saved, _ = self.run_with('nope', 'nope', VALID_DRAFT)
+        self.assertEqual(saved.state, JobState.FAILED)
+        self.assertIsNone(saved.result)
+        self.assertEqual(len(self.local.calls), 2)
+
+    def test_repair_uses_qualified_local_route_and_states_the_schema(self):
+        saved, _ = self.run_with('not-json', VALID_DRAFT)
+        self.assertEqual(saved.state, JobState.SUCCEEDED)
+        repair = self.local.calls[1]
+        self.assertEqual(repair.model.model_id, MODEL_ID)
+        self.assertEqual(repair.model.digest_sha256, DIGEST)
+        self.assertEqual(repair.model.runtime_reference, RUNTIME)
+        self.assertEqual(repair.max_output_tokens, self.definition.output_token_budget)
+        self.assertEqual(repair.thinking.value, 'off')
+        self.assertIn('"recommended_next_actions"', repair.prompt)
+        self.assertIn('no markdown', repair.prompt)
+        self.assertIn('untrusted data', repair.prompt)
+        self.assertIn('not-json', repair.prompt)
+        result = saved.result['structured_result']
+        self.assertEqual(result['qualification_id'], QUALIFICATION)
+        self.assertEqual(result['model'], MODEL_ID)
+        self.assertFalse(saved.result['fallback'])
+
+
 class AgentControlPlaneTests(AgentFixture):
     def setUp(self):
         super().setUp()

@@ -372,10 +372,11 @@ class Node0Supervisor:
             restart_count=len(self.restart_times), last_failure=self.last_failure,
             ready_for_local_routing=self._ready, updated_at=self._now())
 
-    def _ensure_exact_runtime(self) -> QualificationIdentity:
+    def _ensure_exact_runtime(self, *, recheck: bool = False) -> QualificationIdentity:
         # Empty generation loads exact local weights without generating a response.
         self.runtime.start()
-        self._transition('RUNTIME_HEALTHY')
+        if not recheck:
+            self._transition('RUNTIME_HEALTHY')
         payload = self.http.post('/api/generate', {'model': self.config.qualification.model_reference,
             'prompt': '', 'stream': False, 'keep_alive': '10m',
             'options': {'num_ctx': self.config.qualification.context_tokens}})
@@ -409,9 +410,13 @@ class Node0Supervisor:
         except Exception as exc:
             self.audit.write('node0.continuity.observe.failed', error_type=type(exc).__name__)
 
-    def _trust_or_requalify(self, identity: QualificationIdentity) -> bool:
-        self._ready = False
-        self._transition('VERIFYING')
+    def _trust_or_requalify(self, identity: QualificationIdentity, *, recheck: bool = False) -> bool:
+        # A periodic recheck keeps publishing the last known-good readiness until the
+        # probe actually decides, so an in-flight check never advertises ready=false.
+        # Every failure branch below still clears readiness before reporting.
+        if not recheck:
+            self._ready = False
+            self._transition('VERIFYING')
         assessment = self.node.store.status(identity)
         self.qualification_state = assessment.state.value
         self.last_qualification_verification = self._now()
@@ -427,6 +432,7 @@ class Node0Supervisor:
                              identity=identity.fingerprint, reused=True)
             self._observe_runtime_available()
             return True
+        self._ready = False
         self._transition('REQUALIFYING', reason=assessment.state.value)
         self.audit.write('node0.qualification.requalification.started', reason=assessment.state.value)
         record = self.node.qualify()
@@ -497,8 +503,8 @@ class Node0Supervisor:
     def health_check(self) -> bool:
         if not self.runtime.process or self.runtime.process.poll() is not None:
             raise ProbeFailure('unavailable')
-        identity = self._ensure_exact_runtime()
-        if not self._trust_or_requalify(identity):
+        identity = self._ensure_exact_runtime(recheck=True)
+        if not self._trust_or_requalify(identity, recheck=True):
             raise ProbeFailure('assertion_failed')
         return True
 

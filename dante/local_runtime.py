@@ -277,6 +277,25 @@ class OllamaAdapter(LocalRuntimeAdapter):
         except (KeyError, TypeError, ValueError, AttributeError):
             raise InvalidResponse('Invalid Ollama loaded model inventory') from None
 
+    def show(self, reference):
+        """Read-only GGUF metadata for an installed model.
+
+        Reports architecture, parameter count and declared context from the artifact on
+        disk. It never loads weights into VRAM, never runs the model and never mutates
+        the store, so it is safe for discovery.
+        """
+        if not isinstance(reference, str) or not reference.strip():
+            raise InvalidRequest('Model reference is required')
+        payload = self._json('/api/show', {'model': reference.strip()})
+        if not isinstance(payload, dict):
+            raise InvalidResponse('Invalid Ollama model details')
+        details, info = payload.get('details'), payload.get('model_info')
+        if not isinstance(details, dict) or not isinstance(info, dict):
+            raise InvalidResponse('Incomplete Ollama model details')
+        if details.get('remote_host') or details.get('remote_model') or details.get('format') != 'gguf':
+            raise PolicyDenied('Only local GGUF artifacts can be described')
+        return payload
+
     def complete(self, request: InferenceRequest) -> InferenceResponse:
         return self._complete(request)
 

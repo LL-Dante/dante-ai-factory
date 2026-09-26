@@ -601,7 +601,7 @@ class Node0RegressionTests(unittest.TestCase):
     def test_research_agent_still_registers_and_keeps_its_draft_contract(self):
         registry = build_agent_registry(model_target())
         self.assertEqual([item.agent_id for item in registry.list()],
-                         ['dante-hardware', 'dante-research'])
+                         ['dante-hardware', 'dante-model-scout', 'dante-research'])
         research = registry.describe('dante-research')
         self.assertEqual(research.output_token_budget, 384)
         self.assertEqual(research.timeout_s, 120.0)

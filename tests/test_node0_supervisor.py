@@ -164,7 +164,7 @@ class SupervisorTests(unittest.TestCase):
                 self.assertIs(supervisor.orchestrator.executor.runner, supervisor.agent_runner)
                 self.assertIs(supervisor.agent_runner.registry, supervisor.agent_registry)
                 self.assertEqual([definition.agent_id for definition in supervisor.agent_registry.list()],
-                                 ['dante-hardware', 'dante-research'])
+                                 ['dante-hardware', 'dante-model-scout', 'dante-research'])
                 service = server_type.call_args.args[0]
                 self.assertIs(service.agent_registry, supervisor.agent_registry)
                 self.assertIs(service.orchestrator, supervisor.orchestrator)

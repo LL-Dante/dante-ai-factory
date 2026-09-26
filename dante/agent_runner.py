@@ -17,6 +17,7 @@ from dante.contracts.inference import ThinkingPolicy
 from dante.hardware_inventory import capability_profile, collect_snapshot
 from dante.inference import InferenceCancelled
 from dante.local_runtime import OllamaAdapter
+from dante.model_scout import discover_models
 from dante.workload import (ExecutionResult, JobRecord, Node0InferenceExecutor,
                             QualificationRejected, WorkloadSpec)
 
@@ -266,6 +267,7 @@ class DanteResearchAgent:
 
 
 READ_ONLY_CAPABILITY = READ_ONLY_CAPABILITIES[0]
+MODEL_SCOUT_AGENT_ID = 'dante-model-scout'
 
 
 class DanteHardwareAgent:
@@ -391,6 +393,152 @@ class DanteHardwareAgent:
         return ' '.join(parts)
 
 
+class DanteModelScout:
+    """Read-only enumeration of every locally installed model. Performs no inference.
+
+    Stage B1 scope: discover what models already exist on every known local runtime
+    and store, normalize their metadata, and derive byte-level fit facts against the
+    Stage A hardware snapshot. It never pulls, deletes, loads, quantizes, ranks or
+    executes a model, and it never declares a winner. Benchmark design is recorded as
+    a plan; nothing is measured.
+    """
+
+    AGENT_ID = MODEL_SCOUT_AGENT_ID
+    READ_ONLY = True
+
+    def __init__(self, *, endpoints=None, model_stores=None, collector=None, scout=None):
+        self._endpoints = endpoints
+        self._model_stores = model_stores
+        self._collector = collector or collect_snapshot
+        self._scout = scout or discover_models
+
+    @classmethod
+    def definition(cls, model_target: AgentModelTarget) -> AgentDefinition:
+        return AgentDefinition(
+            agent_id=cls.AGENT_ID,
+            name='Dante Model Scout',
+            role='Read-only discovery and normalization of locally installed models',
+            instructions=(
+                'Enumerate and normalize every model already installed on each local runtime. '
+                'Report installed, resident, qualified and unknown state separately, and derive '
+                'fit facts only from measured bytes. Do not load, pull, delete or benchmark any '
+                'model, do not rank models, and do not change any setting.'
+            ),
+            capabilities=('READ_ONLY_INVENTORY',),
+            model_target=model_target,
+            thinking=ThinkingPolicy.OFF,
+            output_token_budget=64,
+            timeout_s=180,
+            version='1.0.0',
+        )
+
+    def execute(self, inference: Node0InferenceExecutor, job: JobRecord,
+                definition: AgentDefinition, payload: AgentTaskPayload, spec: WorkloadSpec,
+                cancellation: threading.Event, emit) -> ExecutionResult:
+        if cancellation.is_set():
+            raise InferenceCancelled('Model discovery cancelled')
+        started = datetime.now(timezone.utc)
+        targets = self._targets(inference)
+        endpoints, qualified_endpoint, stores = targets[:3]
+        qualified_model, qualified_id = targets[3], targets[4]
+        emit('agent.model_scout.collecting', runtime_endpoints=len(endpoints),
+             model_stores=len(stores), qualified_model=qualified_model)
+        hardware = self._collector(runtime_endpoints=endpoints,
+                                   qualified_endpoint=qualified_endpoint, model_stores=stores)
+        if cancellation.is_set():
+            raise InferenceCancelled('Model discovery cancelled')
+        snapshot = self._scout(hardware=hardware, runtime_endpoints=endpoints,
+                               qualified_endpoint=qualified_endpoint,
+                               qualified_model=qualified_model, qualified_id=qualified_id)
+        if cancellation.is_set():
+            raise InferenceCancelled('Model discovery cancelled')
+        measured, derived, unknown = snapshot.fact_count()
+        emit('agent.model_scout.collected', probe_version=snapshot.probe_version,
+             models=snapshot.model_count, loaded=snapshot.loaded_count,
+             qualified=snapshot.qualified_count, measured_facts=measured,
+             derived_facts=derived, unknown_facts=unknown,
+             runtimes=len(snapshot.registry.runtimes_observed),
+             unreachable_runtimes=len(snapshot.registry.runtimes_unreachable))
+        completed = datetime.now(timezone.utc)
+        structured = {
+            'scout': snapshot.model_dump(mode='json'),
+            'read_only': True,
+            'inference_performed': False,
+            'benchmark_executed': False,
+            'observed_at': snapshot.observed_at.isoformat(),
+            'started_at': started.isoformat(),
+            'completed_at': completed.isoformat(),
+        }
+        return ExecutionResult(
+            text=self._summary(snapshot),
+            model_id=definition.model_target.model_id,
+            provider_id='ollama',
+            fallback=False,
+            runtime='ollama',
+            metadata={
+                'agent_id': definition.agent_id,
+                'agent_version': definition.version,
+                'probe_version': snapshot.probe_version,
+                'read_only': True,
+                'inference_performed': False,
+                'inference_calls': 0,
+                'model_identity_source': 'job_binding',
+                'model_discovery_source': 'runtime-metadata',
+                'models': snapshot.model_count,
+                'loaded_models': snapshot.loaded_count,
+                'qualified_models': snapshot.qualified_count,
+                'measured_facts': measured,
+                'derived_facts': derived,
+                'unknown_facts': unknown,
+                'unknown_paths': list(snapshot.unknown_fields())[:32],
+                'runtime_endpoints': list(snapshot.registry.runtimes_observed),
+                'benchmark_plan': snapshot.benchmark_plan.plan_version,
+                'benchmark_executed': False,
+                'rankings_withheld': True,
+                'winners_declared': False,
+            },
+            structured_result=structured,
+        )
+
+    def _targets(self, inference):
+        """Endpoints, stores and qualified identity, from explicit wiring only."""
+        endpoints, stores = self._endpoints, self._model_stores
+        qualified_endpoint = qualified_model = qualified_id = None
+        if endpoints is None or stores is None:
+            try:
+                qualification = inference.supervisor.config.qualification
+                qualified_endpoint = qualification.profile.base_url
+                qualified_model = qualification.model_reference
+                qualified_id = getattr(inference.supervisor, 'qualification_id', None)
+                if endpoints is None:
+                    endpoints = (qualified_endpoint, OllamaAdapter.default_url)
+                if stores is None and qualification.model_store is not None:
+                    stores = (Path(qualification.model_store),)
+            except AttributeError:
+                pass
+        return (tuple(dict.fromkeys(endpoints or ())), qualified_endpoint,
+                tuple(stores or ()), qualified_model,
+                qualified_id if isinstance(qualified_id, str) and qualified_id else None)
+
+    @staticmethod
+    def _summary(snapshot) -> str:
+        registry = snapshot.registry
+        return ' '.join([
+            f'probe={snapshot.probe_version}',
+            f'read_only={str(snapshot.read_only).lower()}',
+            f'models={snapshot.model_count}',
+            f'loaded={snapshot.loaded_count}',
+            f'qualified={snapshot.qualified_count}',
+            f'runtimes={len(registry.runtimes_observed)}',
+            f'measured={snapshot.fact_count()[0]}',
+            f'derived={snapshot.fact_count()[1]}',
+            f'unknown={snapshot.fact_count()[2]}',
+            f'benchmark_plan={snapshot.benchmark_plan.plan_version}',
+            f'benchmark_executed={str(snapshot.benchmark_plan.execution_state == "executed").lower()}',
+            'rankings_withheld=true',
+        ])
+
+
 class AgentRunner:
     def __init__(self, registry: AgentRegistry, inference: Node0InferenceExecutor, store):
         self.registry, self.inference, self.store = registry, inference, store
@@ -449,11 +597,13 @@ def build_agent_registry(model_target: AgentModelTarget) -> AgentRegistry:
     registry.register(implementation.definition(model_target), implementation)
     hardware = DanteHardwareAgent()
     registry.register(hardware.definition(model_target), hardware)
+    scout = DanteModelScout()
+    registry.register(scout.definition(model_target), scout)
     return registry
 
 
 __all__ = [
     'AgentOutputInvalid', 'AgentRegistry', 'AgentRunner', 'AgentUnavailable',
-    'DanteHardwareAgent', 'DanteResearchAgent', 'Node0WorkloadExecutor', 'build_agent_registry',
-    'definition_digest',
+    'DanteHardwareAgent', 'DanteModelScout', 'DanteResearchAgent',
+    'Node0WorkloadExecutor', 'build_agent_registry', 'definition_digest',
 ]

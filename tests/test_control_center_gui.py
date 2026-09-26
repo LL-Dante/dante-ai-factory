@@ -12,6 +12,7 @@ from dante.control_center_gui import (
     job_label,
     job_counts,
     job_details_text,
+    job_group,
     job_phase,
     job_submission_text,
     parse_ollama_ps,
@@ -68,6 +69,20 @@ class ControlCenterGuiPresentationTests(unittest.TestCase):
 
     def test_job_counts_ignores_malformed_records(self):
         self.assertEqual(job_counts([None, "x", 42, {"state": "queued"}]), (1, 0))
+
+    def test_job_group_classifies_lifecycle_states(self):
+        for state in ("claimed", "running", "retry_wait", "cancel_requested"):
+            with self.subTest(state=state):
+                self.assertEqual(job_group({"state": state}), "RUNNING")
+        expected = {
+            "queued": "QUEUED", "succeeded": "COMPLETED", "failed": "FAILED",
+            "timed_out": "FAILED", "cancelled": "CANCELLED", "future_state": "UNKNOWN",
+        }
+        for state, group in expected.items():
+            with self.subTest(state=state):
+                self.assertEqual(job_group({"state": state}), group)
+        self.assertEqual(job_group(None), "UNKNOWN")
+        self.assertEqual(job_group("malformed"), "UNKNOWN")
 
     def test_job_details_keep_unreported_tokens_and_metrics_explicit(self):
         text = job_details_text({"job_id": "job-2", "state": "queued", "priority": 1})

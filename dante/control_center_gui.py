@@ -162,6 +162,24 @@ def job_counts(jobs):
     return queued, active
 
 
+def job_group(job):
+    """Group a job record into a coarse lifecycle bucket."""
+    if not isinstance(job, dict):
+        return "UNKNOWN"
+    state = job.get("state")
+    if state in {"running", "claimed", "retry_wait", "cancel_requested"}:
+        return "RUNNING"
+    if state == "queued":
+        return "QUEUED"
+    if state == "succeeded":
+        return "COMPLETED"
+    if state in {"failed", "timed_out"}:
+        return "FAILED"
+    if state == "cancelled":
+        return "CANCELLED"
+    return "UNKNOWN"
+
+
 def job_phase(job, events=None):
     """Show a detailed phase only when durable state/event evidence supports it."""
     state = job.get("state")
@@ -478,7 +496,24 @@ class ControlCenterApp:
                   "priority": 75, "queue": 100, "elapsed": 100, "attempts": 75, "deadline": 150, "failure": 120}
         for column, width in widths.items():
             tree.column(column, width=width, stretch=False)
+        filter_row = ttk.Frame(self.page)
+        filter_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(filter_row, text="Filter", style="Muted.TLabel").pack(side="left")
+        filter_values = ("ALL", "RUNNING", "QUEUED", "COMPLETED", "FAILED", "CANCELLED", "UNKNOWN")
+        current = getattr(self, "_jobs_filter", "ALL")
+        if current not in filter_values:
+            current = "ALL"
+        filter_var = tk.StringVar(self.page, value=current)
+        self._jobs_filter = current
+        filter_box = ttk.Combobox(filter_row, textvariable=filter_var, state="readonly", values=list(filter_values), width=12)
+        filter_box.pack(side="left", padx=8)
+        def on_filter(_e):
+            self._jobs_filter = filter_var.get()
+            self.show_page("Jobs")
+        filter_box.bind("<<ComboboxSelected>>", on_filter)
         for j in self.jobs:
+            if self._jobs_filter != "ALL" and job_group(j) != self._jobs_filter:
+                continue
             state = job_phase(j)
             tree.insert("", "end", iid=j.get("job_id"), values=(
                 state, _known(j.get("job_id")), "Unknown (not reported)", "Unknown (not reported)",

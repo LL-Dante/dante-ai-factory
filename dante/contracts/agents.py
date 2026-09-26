@@ -35,8 +35,9 @@ class AgentRetryPolicy(StrictModel):
         return self
 
 
-AgentCapability = Literal['LOCAL_INFERENCE', 'READ_ONLY_INVENTORY']
+AgentCapability = Literal['LOCAL_INFERENCE', 'READ_ONLY_INVENTORY', 'LOCAL_BENCHMARK']
 READ_ONLY_CAPABILITIES = ('READ_ONLY_INVENTORY',)
+BENCHMARK_CAPABILITIES = ('LOCAL_BENCHMARK',)
 
 
 class AgentDefinition(StrictModel):
@@ -56,7 +57,8 @@ class AgentDefinition(StrictModel):
 
     @model_validator(mode='after')
     def local_inference_only(self):
-        if self.capabilities not in (('LOCAL_INFERENCE',), READ_ONLY_CAPABILITIES):
+        allowed = (('LOCAL_INFERENCE',), READ_ONLY_CAPABILITIES, BENCHMARK_CAPABILITIES)
+        if self.capabilities not in allowed:
             raise ValueError('An agent declares exactly one supported capability')
         return self
 

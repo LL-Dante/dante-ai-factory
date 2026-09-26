@@ -10,14 +10,18 @@ import re
 import threading
 from typing import Any, Protocol
 
-from dante.contracts.agents import (READ_ONLY_CAPABILITIES, AgentDefinition, AgentModelTarget,
+from dante.contracts.agents import (BENCHMARK_CAPABILITIES, READ_ONLY_CAPABILITIES, AgentDefinition, AgentModelTarget,
                                     AgentResult, AgentTaskPayload, ResearchDraft)
+from dante.contracts.benchmarks import BenchmarkParameters, BenchmarkPrompt, text_digest
 from dante.contracts.hardware import HardwareCapabilityProfile, HardwareSnapshot
 from dante.contracts.inference import ThinkingPolicy
+from dante.benchmark_arena import (VRAM_BUDGET_BYTES, VRAM_RESERVE_BYTES, BenchmarkArena,
+                                   ModelTarget)
+from dante.benchmark_runtime import BenchmarkRuntime, BenchmarkRuntimeError
 from dante.hardware_inventory import capability_profile, collect_snapshot
 from dante.inference import InferenceCancelled
 from dante.local_runtime import OllamaAdapter
-from dante.model_scout import discover_models
+from dante.model_scout import discover_models, hardware_snapshot_digest
 from dante.workload import (ExecutionResult, JobRecord, Node0InferenceExecutor,
                             QualificationRejected, WorkloadSpec)
 
@@ -267,7 +271,11 @@ class DanteResearchAgent:
 
 
 READ_ONLY_CAPABILITY = READ_ONLY_CAPABILITIES[0]
+BENCHMARK_CAPABILITY = BENCHMARK_CAPABILITIES[0]
 MODEL_SCOUT_AGENT_ID = 'dante-model-scout'
+BENCHMARK_AGENT_ID = 'dante-benchmark'
+BENCHMARK_ENDPOINT = 'http://127.0.0.1:11434'
+BENCHMARK_REPETITIONS = 2
 
 
 class DanteHardwareAgent:
@@ -539,6 +547,239 @@ class DanteModelScout:
         ])
 
 
+class DanteBenchmarkAgent:
+    """Stage B2 smoke benchmark on an isolated runtime. Never infers on production.
+
+    The agent binds to the qualified model for identity only. It performs zero
+    inference through the Node0 executor: every measurement request goes to the
+    separate benchmark runtime, whose residency it restores before returning. It
+    measures nothing it cannot observe, reports each dimension on its own, and
+    declares no overall winner and no role assignment.
+    """
+
+    AGENT_ID = BENCHMARK_AGENT_ID
+    ISOLATED_BENCHMARK = True
+    DEFAULT_MODELS = ('qwen3:4b', 'hf.co/KikoCis/Qwen3.8-27B-GGUF:Q3_K_M')
+
+    def __init__(self, *, benchmark_endpoint=BENCHMARK_ENDPOINT, models=None,
+                 arena_factory=None, runtime_factory=None, collector=None):
+        self._benchmark_endpoint = benchmark_endpoint
+        self._models = tuple(models or self.DEFAULT_MODELS)
+        self._arena_factory = arena_factory
+        self._runtime_factory = runtime_factory
+        self._collector = collector
+
+    @classmethod
+    def definition(cls, model_target: AgentModelTarget) -> AgentDefinition:
+        return AgentDefinition(
+            agent_id=cls.AGENT_ID,
+            name='Dante Benchmark Agent',
+            role='Isolated local benchmark measurement on a non-production runtime',
+            instructions=(
+                'Measure locally installed models on the isolated benchmark runtime only. '
+                'Never send inference to the qualified production runtime, never pull or delete '
+                'a model, and never change a qualification. Use identical prompts, sampling and '
+                'output budgets, keep production residency unchanged, restore benchmark '
+                'residency afterwards, and report each dimension separately with no overall '
+                'winner and no role assignment.'
+            ),
+            capabilities=('LOCAL_BENCHMARK',),
+            model_target=model_target,
+            thinking=ThinkingPolicy.OFF,
+            output_token_budget=64,
+            timeout_s=600,
+            version='1.0.0',
+        )
+
+    def execute(self, inference: Node0InferenceExecutor, job: JobRecord,
+                definition: AgentDefinition, payload: AgentTaskPayload, spec: WorkloadSpec,
+                cancellation: threading.Event, emit) -> ExecutionResult:
+        if cancellation.is_set():
+            raise InferenceCancelled('Benchmark cancelled')
+        started = datetime.now(timezone.utc)
+        production_endpoint = self._production_endpoint(inference)
+        if production_endpoint.rstrip('/') == self._benchmark_endpoint.rstrip('/'):
+            # The one condition that would let a benchmark load evict a qualified model.
+            raise QualificationRejected(
+                'Benchmark runtime must differ from the qualified production runtime')
+        if cancellation.is_set():
+            raise InferenceCancelled('Benchmark cancelled')
+        hardware_digest = self._hardware_digest_for(inference, production_endpoint)
+        runtime = (self._runtime_factory or BenchmarkRuntime)(self._benchmark_endpoint)
+        production = (self._runtime_factory or BenchmarkRuntime)(production_endpoint)
+        emit('agent.benchmark.started', benchmark_endpoint=self._benchmark_endpoint,
+             production_endpoint=production_endpoint, models=len(self._models),
+             hardware_snapshot_digest=hardware_digest)
+        prompts = benchmark_prompts()
+        arena = (self._arena_factory or BenchmarkArena)(
+            production_endpoint=production_endpoint, benchmark_endpoint=self._benchmark_endpoint,
+            hardware_digest=hardware_digest)
+        emit('agent.benchmark.planned', prompts=len(prompts),
+             repetitions=BENCHMARK_REPETITIONS, budget_bytes=VRAM_BUDGET_BYTES,
+             reserve_bytes=VRAM_RESERVE_BYTES)
+        try:
+            targets, excluded = self._targets(runtime)
+        except BenchmarkRuntimeError as error:
+            emit('agent.benchmark.failed', reason=str(error)[:200])
+            raise QualificationRejected('Benchmark runtime metadata is unavailable') from None
+        emit('agent.benchmark.targets', selected=len(targets), excluded=len(excluded))
+        if not targets:
+            raise QualificationRejected('None of the requested models are installed locally')
+        result = arena.run(runtime, production, targets, prompts,
+                           benchmark_parameters(), repetitions=BENCHMARK_REPETITIONS)
+        completed = datetime.now(timezone.utc)
+        measured, derived, unknown = result.fact_count()
+        isolation = result.isolation
+        if not isolation.verified():
+            # A benchmark that disturbed production, or left residency behind, is a failure.
+            emit('agent.benchmark.isolation_failed',
+                 disturbances=len(isolation.production_disturbances),
+                 violations=len(isolation.violations),
+                 leaked=len(isolation.leaked_residency))
+            raise QualificationRejected('Benchmark isolation could not be verified')
+        emit('agent.benchmark.completed', models=len(result.tested_models()),
+             samples=sum(len(run.samples) for run in result.runs), measured=measured,
+             derived=derived, unknown=unknown, batches=isolation.production_checked_batches)
+        structured = {
+            'benchmark': result.model_dump(mode='json'),
+            'excluded_models': [dict(item) for item in excluded],
+            'inference_performed': False,
+            'inference_calls': 0,
+            'started_at': started.isoformat(),
+            'completed_at': completed.isoformat(),
+        }
+        return ExecutionResult(
+            text=self._summary(result),
+            model_id=definition.model_target.model_id,
+            provider_id='ollama',
+            fallback=False,
+            runtime='ollama',
+            metadata={
+                'agent_id': definition.agent_id,
+                'agent_version': definition.version,
+                'probe_version': result.probe_version,
+                'read_only': False,
+                'inference_performed': False,
+                'inference_calls': 0,
+                'model_identity_source': 'job_binding',
+                'benchmark_endpoint': self._benchmark_endpoint,
+                'production_endpoint': production_endpoint,
+                'production_unchanged': isolation.production_unchanged,
+                'production_checked_batches': isolation.production_checked_batches,
+                'benchmark_restored': isolation.benchmark_restored,
+                'models_tested': len(result.tested_models()),
+                'models_excluded': len(excluded),
+                'measured_facts': measured,
+                'derived_facts': derived,
+                'unknown_facts': unknown,
+                'rankings_withheld': True,
+                'winners_declared': False,
+                'role_assignments': 0,
+                'smoke_only': True,
+            },
+            structured_result=structured,
+        )
+
+    def _production_endpoint(self, inference) -> str:
+        try:
+            return str(inference.supervisor.config.qualification.profile.base_url)
+        except AttributeError:
+            raise QualificationRejected('Qualified production endpoint is unavailable') from None
+
+    def _hardware_digest_for(self, inference, production_endpoint: str) -> str | None:
+        """A real snapshot digest, or None. Absence is never replaced by a placeholder."""
+        if self._collector is None:
+            return None
+        try:
+            snapshot = self._collector()
+        except Exception:
+            return None
+        try:
+            return hardware_snapshot_digest(snapshot)
+        except Exception:
+            return None
+
+    def _targets(self, runtime) -> tuple[tuple[ModelTarget, ...], tuple[dict, ...]]:
+        """Select only models proven installed on the benchmark runtime.
+
+        Presence comes from the store listing, not from a load. A derivative of an
+        already selected artifact is excluded and the reason is recorded, so no
+        benchmark is spent on a near-duplicate.
+        """
+        entries = {entry['name']: entry for entry in runtime.installed()}
+        selected: list[ModelTarget] = []
+        excluded: list[dict] = []
+        seen: set[tuple] = set()
+        for model_id in self._models:
+            entry = entries.get(model_id)
+            if entry is None:
+                excluded.append({'model_id': model_id,
+                                 'reason': 'Not installed on the benchmark runtime'})
+                continue
+            signature = (entry['family'], entry['quantization'], entry['parameter_size'])
+            if entry['parent_model']:
+                excluded.append({'model_id': model_id,
+                                 'reason': f'Declared derivative of {entry["parent_model"]}'})
+                continue
+            if signature in seen:
+                excluded.append({'model_id': model_id,
+                                 'reason': 'Same family, quantization and size as an already selected model'})
+                continue
+            seen.add(signature)
+            selected.append(ModelTarget(
+                model_id=model_id, digest_sha256=entry['digest'], artifact_bytes=entry['size'],
+                block_count=runtime.block_count(model_id), quantization=entry['quantization'],
+                parameter_size=entry['parameter_size'], architecture=entry['family'],
+                native_context_tokens=entry['context_length']))
+        for name, entry in entries.items():
+            if name in self._models:
+                continue
+            reason = (f'Declared derivative of {entry["parent_model"]}' if entry['parent_model']
+                      else 'Not part of the bounded Stage B2 smoke set')
+            excluded.append({'model_id': name, 'reason': reason})
+        return (tuple(sorted(selected, key=lambda item: item.model_id)),
+                tuple(sorted(excluded, key=lambda item: item['model_id'])))
+
+    @staticmethod
+    def _summary(result) -> str:
+        isolation = result.isolation
+        measured, derived, unknown = result.fact_count()
+        parts = [f'probe={result.probe_version}', 'smoke_only=true', 'inference_calls=0',
+                 f'models={len(result.tested_models())}',
+                 f'samples={sum(len(run.samples) for run in result.runs)}',
+                 f'measured={measured}', f'derived={derived}', f'unknown={unknown}',
+                 f'production_unchanged={str(isolation.verified()).lower()}',
+                 f'production_batches={isolation.production_checked_batches}',
+                 f'benchmark_restored={str(isolation.benchmark_restored).lower()}',
+                 f'comparisons={len(result.comparison.dimensions)}',
+                 'rankings_withheld=true', 'winners_declared=false', 'role_assignments=0']
+        return ' '.join(parts)
+
+
+def _int_or_none(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def benchmark_prompts() -> tuple:
+    """A small fixed prompt set. Text is fixed here and proven by digest."""
+    specs = (
+        ('LAT_1', 'latency', 'Name the three primary colors used in pigment painting. '
+         'Answer with a single short sentence and nothing else.'),
+        ('INSTR_1', 'instruction', 'List exactly two rivers and exactly two mountains. '
+         'Use one line per item and no other text.'),
+        ('JSON_1', 'structured_json', 'Return a JSON object with a single key "fact" whose value '
+         'is one short sentence about the Moon.'),
+    )
+    return tuple(BenchmarkPrompt(prompt_id=identifier, kind=kind, digest=text_digest(text),
+                                 characters=len(text), text=text)
+                 for identifier, kind, text in specs)
+
+
+def benchmark_parameters() -> BenchmarkParameters:
+    return BenchmarkParameters(temperature=0.0, seed=42, output_token_budget=48,
+                               context_token_budget=4096, think=False)
+
+
 class AgentRunner:
     def __init__(self, registry: AgentRegistry, inference: Node0InferenceExecutor, store):
         self.registry, self.inference, self.store = registry, inference, store
@@ -564,6 +805,9 @@ class AgentRunner:
         if READ_ONLY_CAPABILITY in definition.capabilities and not getattr(
                 registration.implementation, 'READ_ONLY', False):
             raise AgentUnavailable('Read-only agent requires a read-only implementation')
+        if BENCHMARK_CAPABILITY in definition.capabilities and not getattr(
+                registration.implementation, 'ISOLATED_BENCHMARK', False):
+            raise AgentUnavailable('Benchmark agent requires an isolated benchmark implementation')
 
         def emit(event, **metadata):
             safe = {'agent_id': definition.agent_id, 'agent_version': definition.version, **metadata}
@@ -599,11 +843,14 @@ def build_agent_registry(model_target: AgentModelTarget) -> AgentRegistry:
     registry.register(hardware.definition(model_target), hardware)
     scout = DanteModelScout()
     registry.register(scout.definition(model_target), scout)
+    benchmark = DanteBenchmarkAgent()
+    registry.register(benchmark.definition(model_target), benchmark)
     return registry
 
 
 __all__ = [
     'AgentOutputInvalid', 'AgentRegistry', 'AgentRunner', 'AgentUnavailable',
-    'DanteHardwareAgent', 'DanteModelScout', 'DanteResearchAgent',
-    'Node0WorkloadExecutor', 'build_agent_registry', 'definition_digest',
+    'DanteBenchmarkAgent', 'DanteHardwareAgent', 'DanteModelScout', 'DanteResearchAgent',
+    'Node0WorkloadExecutor', 'build_agent_registry', 'benchmark_parameters',
+    'benchmark_prompts', 'definition_digest',
 ]

@@ -552,7 +552,7 @@ class ScoutAgentTests(unittest.TestCase):
     def test_agent_is_listed_by_the_default_registry(self):
         registry = build_agent_registry(self.TARGET)
         self.assertEqual([item.agent_id for item in registry.list()],
-                         ['dante-hardware', 'dante-model-scout', 'dante-research'])
+                         ['dante-benchmark', 'dante-hardware', 'dante-model-scout', 'dante-research'])
 
     def test_agent_performs_no_inference_and_never_touches_the_model_route(self):
         events: list = []

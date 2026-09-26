@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from dante.contracts import Task, TaskStatus, PrivacyClass, CostClass
 from dante.contracts.continuity import ContinuityPolicy, BackendState as State
@@ -169,6 +170,39 @@ class ContinuityTests(unittest.TestCase):
         self.assertEqual((observed['state'], observed['consecutive_failures'], observed['last_success']),
                          ('available', 0, self.now))
         self.assertIsNone(observed['cooldown_until'])
+
+    def test_read_only_provider_status_preserves_persisted_cooldown(self):
+        self.manager.observe('fake-local', State.DEGRADED,
+                             cooldown_until=self.now + 20, reason='timeout')
+        before = self.manager.observation('fake-local')
+        with patch.object(self.manager, 'observe', wraps=self.manager.observe) as observe:
+            status = self.manager.read_only_status()
+            observe.assert_not_called()
+        after = self.manager.observation('fake-local')
+        self.assertEqual(before, after)
+        local = next(item for item in status if item['provider'] == 'fake-local')
+        self.assertEqual(local['state'], State.DEGRADED.value)
+        self.assertEqual(local['reason'], 'timeout')
+        self.assertEqual(local['consecutive_errors'], 1)
+        self.assertEqual(local['cooldown_until'],
+                         '1970-01-01T00:17:00+00:00')
+        self.assertAlmostEqual(local['cooldown_remaining_s'], 20)
+        self.assertFalse(local['probation'])
+        self.assertFalse(local['route_admissible'])
+        self.assertEqual(local['denial_reason'], 'cooldown')
+
+    def test_invalid_response_diagnostic_survives_local_route_denial(self):
+        diagnostic = {'http_status': 200, 'json_decoded': True,
+                      'failed_validation_rule': 'generation_not_complete',
+                      'failed_field': 'done', 'expected': 'true', 'actual': 'false'}
+        self.manager.policy = ContinuityPolicy(mode='LOCAL_ONLY')
+        self.local.error = InvalidResponse('Invalid Ollama response', diagnostic=diagnostic)
+        outcome = self.infer()
+        self.assertEqual(outcome.reason, 'routes_temporarily_unavailable')
+        self.assertEqual(outcome.diagnostic, diagnostic)
+        failure = next(event for event in self.ledger.events(self.task.task_id)
+                       if event['event'] == 'continuity.failure')
+        self.assertEqual(json.loads(failure['metadata'])['diagnostic'], diagnostic)
 
     def test_audit_sanitized(self):
         self.cloud.error = AdapterUnavailable('confidential exception marker')

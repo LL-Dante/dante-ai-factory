@@ -6,7 +6,7 @@ def migrate(connection: sqlite3.Connection) -> None:
     connection.execute('BEGIN IMMEDIATE')
     try:
         version = connection.execute('PRAGMA user_version').fetchone()[0]
-        if version > 4:
+        if version > 5:
             raise RuntimeError('Unsupported DANTE database schema')
         if version == 0:
             connection.execute('''CREATE TABLE task_acceptance (
@@ -63,6 +63,55 @@ def migrate(connection: sqlite3.Connection) -> None:
             )''')
             connection.execute('CREATE INDEX IF NOT EXISTS qualification_scope ON model_qualifications(scope,sequence)')
             connection.execute('PRAGMA user_version=4')
+        if version < 5:
+            connection.execute('''CREATE TABLE workload_jobs (
+                job_id TEXT PRIMARY KEY,
+                idempotency_key TEXT UNIQUE,
+                request_digest TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('queued','claimed','running','cancel_requested',
+                    'retry_wait','succeeded','failed','cancelled','timed_out')),
+                priority INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                created_epoch REAL NOT NULL,
+                updated_at TEXT NOT NULL,
+                eligible_at REAL NOT NULL,
+                deadline_epoch REAL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                current_attempt_id TEXT,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                result_json TEXT,
+                failure_json TEXT
+            )''')
+            connection.execute('''CREATE TABLE workload_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES workload_jobs(job_id),
+                attempt_number INTEGER NOT NULL,
+                worker_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                started_at TEXT,
+                ended_at TEXT,
+                failure_json TEXT,
+                response_digest TEXT,
+                UNIQUE(job_id,attempt_number)
+            )''')
+            connection.execute('''CREATE TABLE workload_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL REFERENCES workload_jobs(job_id),
+                attempt_id TEXT,
+                event TEXT NOT NULL,
+                timestamp_utc TEXT NOT NULL,
+                metadata TEXT NOT NULL
+            )''')
+            connection.execute('CREATE INDEX workload_runnable ON workload_jobs(state,priority DESC,eligible_at,created_epoch,job_id)')
+            connection.execute('CREATE INDEX workload_history ON workload_attempts(job_id,attempt_number)')
+            connection.execute('''CREATE TABLE workload_control (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                owner_id TEXT NOT NULL,
+                process_id INTEGER NOT NULL,
+                heartbeat_epoch REAL NOT NULL
+            )''')
+            connection.execute('PRAGMA user_version=5')
         connection.commit()
     except BaseException:
         connection.rollback()

@@ -3,13 +3,18 @@ from pathlib import Path
 import json
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
+from types import SimpleNamespace
 
+from dante.contracts.continuity import BackendState
+from dante.contracts.inference import ThinkingPolicy
 from dante.contracts.qualification import QualificationAssessment, QualificationState
 from dante.contracts.runtime import RuntimeProfile
-from dante.node0_supervisor import Node0Supervisor, RotatingAudit, SupervisorConfig, WindowsMutex
+from dante.node0_supervisor import (Node0Supervisor, RotatingAudit, SupervisorConfig,
+                                    WindowsMutex, _absolute_from_config)
 from dante.ollama_qualification import OllamaQualificationConfig, ProbeFailure
 from test_local_runtime import model
 from test_qualification import identity
@@ -73,16 +78,36 @@ class FakeStore:
     def latest(self, identity): return self.record
 
 
+class FakeContinuity:
+    def __init__(self):
+        self.observations = {}
+        self.calls = []
+
+    def observe(self, backend_id, state, **kwargs):
+        self.calls.append((backend_id, state, kwargs))
+        self.observations[backend_id] = {'state': state, **kwargs}
+
+    def read_only_status(self, *, context_tokens=None):
+        value = self.observations.get('ollama', {})
+        return [{'provider': 'ollama', 'state': str(value.get('state', BackendState.UNKNOWN)),
+                 'reason': value.get('reason'), 'consecutive_errors': 0,
+                 'cooldown_until': value.get('cooldown_until'),
+                 'probation': False, 'route_admissible': False,
+                 'denial_reason': 'health_unknown' if not value else 'cooldown'}]
+
+
 class FakeNode:
     def __init__(self, identity, state=QualificationState.QUALIFIED):
         self.store = FakeStore(identity, state)
         self.gate = type('Gate', (), {'current': None})()
+        self.registry = type('Registry', (), {'require_automatic': lambda *a, **k: None})()
         self.qualifications = 0
         self.force_qualification_failure = False
-        self.continuity = type('Continuity', (), {'observe': lambda *a: None})()
+        self.continuity = FakeContinuity()
         self.host = type('Host', (), {
             'start': lambda *a: type('Task', (), {'task_id':'task'})(),
-            'infer': lambda *a: 'fixture response'})()
+            'complete': lambda *a: None,
+            'infer': lambda *a, **k: SimpleNamespace(content='fixture response')})()
     def qualify(self):
         self.qualifications += 1
         if self.force_qualification_failure:
@@ -120,6 +145,11 @@ class SupervisorTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_relative_persistence_paths_anchor_to_config_directory(self):
+        config = self.root/'config'/'qualification-config.json'
+        self.assertEqual(_absolute_from_config(Path('data')/'state.json', config),
+                         config.parent/'data'/'state.json')
 
     def test_start_reuses_exact_verified_evidence_and_single_composition_gate(self):
         supervisor, _ = build(self.root)
@@ -235,10 +265,87 @@ class SupervisorTests(unittest.TestCase):
     def test_inference_bridge_uses_shared_host_and_readiness_gate(self):
         supervisor, _ = build(self.root)
         self.assertTrue(supervisor.start())
-        self.assertEqual(supervisor.infer('private test prompt'), 'fixture response')
+        self.assertEqual(supervisor.infer('private test prompt').content, 'fixture response')
         supervisor._ready = False
         with self.assertRaisesRegex(ValueError, 'not ready'):
             supervisor.infer('must not execute')
+
+    def test_inference_thinking_policy_defaults_off_and_explicit_on_propagates(self):
+        supervisor, _ = build(self.root)
+        self.assertTrue(supervisor.start())
+        calls = []
+        def capture(*args, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(content='fixture response')
+        supervisor.node.host.infer = capture
+
+        supervisor.infer('ordinary operational request')
+        supervisor.infer('explicit reasoning request', thinking=ThinkingPolicy.ON)
+
+        self.assertEqual(calls[0]['thinking'], ThinkingPolicy.OFF)
+        self.assertEqual(calls[1]['thinking'], ThinkingPolicy.ON)
+
+    def test_inference_does_not_clear_degraded_cooldown_before_routing(self):
+        supervisor, _ = build(self.root)
+        self.assertTrue(supervisor.start())
+        continuity = supervisor.node.continuity
+        cooldown = time.time() + 60
+        continuity.observe('ollama', BackendState.DEGRADED,
+                           cooldown_until=cooldown, reason='timeout')
+        continuity.calls.clear()
+
+        def routed_inference(*_args, **_kwargs):
+            self.assertEqual(continuity.calls, [])
+            self.assertEqual(continuity.observations['ollama']['state'], BackendState.DEGRADED)
+            self.assertEqual(continuity.observations['ollama']['cooldown_until'], cooldown)
+            # The downstream continuity layer records availability only after
+            # the backend request has succeeded.
+            continuity.observe('ollama', BackendState.AVAILABLE)
+            return SimpleNamespace(content='fixture response')
+
+        supervisor.node.host.infer = routed_inference
+        self.assertEqual(supervisor.infer('private test prompt').content, 'fixture response')
+        self.assertEqual([call[1] for call in continuity.calls], [BackendState.AVAILABLE])
+
+    def test_failed_backend_request_records_failure_after_request_starts(self):
+        supervisor, _ = build(self.root)
+        self.assertTrue(supervisor.start())
+        continuity = supervisor.node.continuity
+
+        def failed_inference(*_args, **_kwargs):
+            self.assertEqual(continuity.calls, [])
+            continuity.observe('ollama', BackendState.DEGRADED,
+                               cooldown_until=time.time() + 30, reason='timeout')
+            raise ProbeFailure('timeout')
+
+        supervisor.node.host.infer = failed_inference
+        with self.assertRaisesRegex(ProbeFailure, 'timeout'):
+            supervisor.infer('private test prompt')
+        self.assertEqual([call[1] for call in continuity.calls], [BackendState.DEGRADED])
+        self.assertEqual(continuity.observations['ollama']['state'], BackendState.DEGRADED)
+        self.assertGreater(continuity.observations['ollama']['cooldown_until'], time.time())
+
+    def test_operator_status_exposes_continuity_without_mutating_it(self):
+        supervisor, _ = build(self.root)
+        self.assertTrue(supervisor.start())
+        continuity = supervisor.node.continuity
+        cooldown = time.time() + 45
+        continuity.observe('ollama', BackendState.DEGRADED,
+                           cooldown_until=cooldown, reason='timeout')
+        before = {provider: dict(value) for provider, value in continuity.observations.items()}
+        continuity.calls.clear()
+
+        status = supervisor.operator_status()
+
+        after = {provider: dict(value) for provider, value in continuity.observations.items()}
+        self.assertEqual(before, after)
+        self.assertEqual(continuity.calls, [])
+        ollama = next(item for item in status['continuity'] if item['provider'] == 'ollama')
+        self.assertEqual(ollama['state'], str(BackendState.DEGRADED))
+        self.assertEqual(ollama['reason'], 'timeout')
+        self.assertEqual(ollama['cooldown_until'], cooldown)
+        self.assertFalse(ollama['route_admissible'])
+        self.assertEqual(ollama['denial_reason'], 'cooldown')
 
     def test_duplicate_instance_exits_without_touching_runtime(self):
         class HeldLock(FakeLock):

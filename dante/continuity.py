@@ -1,12 +1,15 @@
 """Persistent, backend-neutral route reevaluation. No transports or tool execution."""
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import math
 import time
 
-from dante.contracts import RouteDecision
-from dante.contracts.continuity import BackendState as State, ContinuityDisposition as Disposition, ContinuityPolicy
-from dante.contracts.inference import InferenceRequest, InferenceResponse
+from dante.contracts import CostClass, LifecycleState, PrivacyClass, RouteDecision
+from dante.contracts.continuity import (BackendState as State, ContinuityDisposition as Disposition,
+    ContinuityPolicy, ExecutionPolicy)
+from dante.contracts.inference import (DEFAULT_MAX_OUTPUT_TOKENS, InferenceRequest,
+    InferenceResponse, ThinkingPolicy)
 from dante.inference import (InferenceError, InferenceTimeout, AdapterUnavailable, RateQuotaUnavailable,
     QuotaExhausted, ContextExceeded, InvalidResponse, PolicyDenied, QualificationDenied,
     ConfigurationDenied, InvalidRequest)
@@ -19,6 +22,7 @@ class ContinuityOutcome:
     reason: str
     response: InferenceResponse | None = None
     next_attempt_at: float | None = None
+    diagnostic: dict | None = None
 
 
 class ContinuitySignal(Exception):
@@ -54,6 +58,97 @@ class ContinuityManager:
         with closing(self.ledger._connect()) as db:
             row = db.execute('SELECT * FROM backend_observations WHERE backend_id=?', (backend_id,)).fetchone()
         return dict(row) if row else None
+
+    def read_only_status(self, *, context_tokens=None):
+        """Return bounded operational state for configured providers without writing state."""
+        now = self.clock()
+        models = self.router.registry.candidates()
+        providers = sorted({model.provider_id for model in models if model.provider_id})
+        result = []
+        for provider in providers:
+            provider_models = [model for model in models if model.provider_id == provider]
+            observation = self.observation(provider)
+            state = observation['state'] if observation else State.UNKNOWN.value
+            reason = observation['reason'] if observation else None
+            failures = observation['consecutive_failures'] if observation else 0
+            observed_at = observation['observed_at'] if observation else None
+            last_success = observation['last_success'] if observation else None
+            cooldown_until = observation['cooldown_until'] if observation else None
+            cooldown_remaining = max(0.0, cooldown_until - now) if cooldown_until is not None else None
+            probation = cooldown_until is not None and cooldown_until <= now
+            retry_at = None
+            denial = None
+
+            if not provider_models:
+                denial = 'provider_not_configured'
+            elif self.policy.allowed_backends and provider not in self.policy.allowed_backends:
+                denial = 'user_policy'
+            else:
+                eligible = []
+                static_denials = []
+                for model in provider_models:
+                    capacity = (model.local_metadata.context_tokens if model.local_metadata
+                                else model.context_tokens)
+                    if ((self.policy.mode == ExecutionPolicy.LOCAL_ONLY and not model.local)
+                            or (self.policy.mode == ExecutionPolicy.CLOUD_ONLY and model.local)
+                            or (self.policy.mode == ExecutionPolicy.SPECIFIC_ALLOWED_BACKENDS
+                                and not self.policy.allowed_backends)):
+                        static_denials.append('user_policy')
+                    elif (not model.available or model.lifecycle not in
+                          {LifecycleState.APPROVED, LifecycleState.PRODUCTION}):
+                        static_denials.append('administratively_unavailable' if not model.available
+                                              else 'qualification')
+                    elif (model.cost_class not in {CostClass.ZERO, CostClass.LOCAL_COMPUTE}
+                            or (not model.local and model.cost_verification != 'VERIFIED_ZERO')):
+                        static_denials.append('cost_unverified_or_paid')
+                    elif PrivacyClass.INTERNAL not in model.privacy_eligibility or (not model.local
+                                                                                   and self.policy.mode == ExecutionPolicy.LOCAL_ONLY):
+                        static_denials.append('privacy')
+                    elif context_tokens is not None and (capacity is None or capacity < context_tokens):
+                        static_denials.append('context_capacity')
+                    else:
+                        eligible.append(model)
+                if not eligible:
+                    denial = static_denials[0] if static_denials else 'no_eligible_route'
+                adapter = self.gateway.adapters.get(provider)
+                if denial is None and (adapter is None or adapter.automatic_cost != 0):
+                    denial = 'adapter_configuration_or_cost'
+                elif denial is None and (observation is None or state == State.UNKNOWN.value):
+                    denial = 'health_unknown'
+                    retry_at = now + self.policy.base_backoff_s
+                elif denial is None and cooldown_until is not None and cooldown_until > now:
+                    denial = 'cooldown'
+                    retry_at = cooldown_until
+                elif (denial is None and cooldown_until is None
+                      and state not in {State.AVAILABLE.value, State.DEGRADED.value}):
+                    denial = 'health_unavailable_or_stale'
+                    retry_at = now + self.policy.base_backoff_s
+                elif (denial is None and cooldown_until is None
+                      and now - observed_at > self.policy.observation_ttl_s):
+                    denial = 'health_unavailable_or_stale'
+                    retry_at = now + self.policy.base_backoff_s
+
+            result.append({
+                'provider': provider,
+                'state': state,
+                'reason': reason,
+                'consecutive_errors': failures,
+                'last_observed_at': self._status_timestamp(observed_at),
+                'last_failure_at': self._status_timestamp(observed_at) if failures else None,
+                'last_success_at': self._status_timestamp(last_success),
+                'cooldown_until': self._status_timestamp(cooldown_until),
+                'cooldown_remaining_s': round(cooldown_remaining, 3) if cooldown_remaining is not None else None,
+                'probation': bool(probation),
+                'retry_at': self._status_timestamp(retry_at),
+                'retry_in_s': round(max(0.0, retry_at - now), 3) if retry_at is not None else None,
+                'route_admissible': denial is None,
+                'denial_reason': denial,
+            })
+        return result
+
+    @staticmethod
+    def _status_timestamp(value):
+        return datetime.fromtimestamp(value, timezone.utc).isoformat() if value is not None else None
 
     def observe(self, backend_id, state: State, *, cooldown_until=None, reason=None, task=None):
         """Trusted health input; free-form reasons and response bodies are never stored."""
@@ -95,7 +190,7 @@ class ContinuityManager:
             db.execute('UPDATE task_continuity SET attempts=attempts+1 WHERE task_id=?', (task.task_id,))
         return None
 
-    def _outcome(self, task, disposition, reason, *, response=None, retry_at=None):
+    def _outcome(self, task, disposition, reason, *, response=None, retry_at=None, diagnostic=None):
         with closing(self.ledger._connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
             assert_lease(db, task.task_id)
@@ -105,15 +200,19 @@ class ContinuityManager:
             if disposition == Disposition.CONTINUE_NOW:
                 db.execute('UPDATE task_continuity SET window_start=?,attempts=0 WHERE task_id=?',
                            (self.clock(), task.task_id))
-            self.ledger._event(db, task, 'continuity.outcome', task.status,
-                              {'disposition': disposition.value, 'reason': reason, 'next_attempt_at': retry_at})
-        return ContinuityOutcome(disposition, reason, response, retry_at)
+            metadata = {'disposition': disposition.value, 'reason': reason, 'next_attempt_at': retry_at}
+            if diagnostic is not None:
+                metadata['diagnostic'] = diagnostic
+            self.ledger._event(db, task, 'continuity.outcome', task.status, metadata)
+        return ContinuityOutcome(disposition, reason, response, retry_at, diagnostic)
 
-    def infer(self, task, privacy, messages, capabilities, *, tools=(), context_tokens=None):
+    def infer(self, task, privacy, messages, capabilities, *, tools=(), context_tokens=None,
+              max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS, thinking=ThinkingPolicy.OFF):
         if context_tokens is not None and (isinstance(context_tokens, bool) or not isinstance(context_tokens, int) or context_tokens <= 0):
             return self._outcome(task, Disposition.TERMINAL, 'invalid_request')
         excluded = {}
         previous = None
+        last_diagnostic = None
         while True:
             now = self.clock()
             candidates, denied = self.router.continuity_candidates(privacy,
@@ -153,7 +252,8 @@ class ContinuityManager:
                               else 'provider_rate_limit_cooldown' if set(cooldown_reasons) == {'rate_limit'}
                               else 'routes_temporarily_unavailable')
                     return self._outcome(task, Disposition.RETRY_LATER, reason,
-                                         retry_at=max(now + self.policy.base_backoff_s, min(retry_dates)))
+                                         retry_at=max(now + self.policy.base_backoff_s, min(retry_dates)),
+                                         diagnostic=last_diagnostic)
                 return self._outcome(task, Disposition.TERMINAL, 'no_eligible_route')
             retry_at = self._reserve(task)
             if retry_at is not None:
@@ -167,11 +267,14 @@ class ContinuityManager:
             self.ledger.set_route(decision)
             try:
                 response = self.gateway.infer_once(decision, InferenceRequest(model=selected, messages=messages,
-                    tools=tools, task_id=task.task_id, trace_id=task.trace_id))
+                    tools=tools, task_id=task.task_id, trace_id=task.trace_id,
+                    max_output_tokens=max_output_tokens, thinking=thinking))
             except InferenceError as exc:
                 reason, state, retry = classify(exc)
+                last_diagnostic = exc.diagnostic if isinstance(exc.diagnostic, dict) else last_diagnostic
                 self._event(task, 'failure', {'model_id': selected.model_id, 'backend_id': selected.provider_id,
-                                            'classification': reason})
+                                            'classification': reason,
+                                            **({'diagnostic': last_diagnostic} if last_diagnostic is not None else {})})
                 if retry:
                     observation = self.observation(selected.provider_id)
                     failures = observation['consecutive_failures'] if observation else 0

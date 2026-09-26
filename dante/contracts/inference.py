@@ -2,11 +2,21 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue, StrictInt, model_validator
 
 from dante.contracts import ModelRef, StrictModel
+
+
+DEFAULT_MAX_OUTPUT_TOKENS = 512
+MAX_OUTPUT_TOKENS = 2048
+
+
+class ThinkingPolicy(StrEnum):
+    OFF = 'off'
+    ON = 'on'
 
 
 class ToolCall(StrictModel):
@@ -65,7 +75,8 @@ class InferenceRequest(StrictModel):
     messages: tuple[Message, ...] = Field(min_length=1)
     tools: tuple[ToolDefinition, ...] = ()
     temperature: float = Field(default=0, ge=0, le=2, allow_inf_nan=False)
-    max_output_tokens: int | None = Field(default=None, gt=0)
+    max_output_tokens: int = Field(default=DEFAULT_MAX_OUTPUT_TOKENS, ge=1, le=MAX_OUTPUT_TOKENS)
+    thinking: ThinkingPolicy = ThinkingPolicy.OFF
     task_id: str | None = None
     trace_id: str | None = None
 

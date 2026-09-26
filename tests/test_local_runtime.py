@@ -9,7 +9,8 @@ import httpx
 from pydantic import ValidationError
 from dante.contracts import ModelRef, LifecycleState, CostClass, PrivacyClass, Task, ToolManifest, RouteDecision
 from dante.contracts.runtime import LocalModelMetadata, RuntimeProfile
-from dante.contracts.inference import InferenceRequest, AssistantMessage, ToolCall, ToolResult, ToolDefinition
+from dante.contracts.inference import (DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS,
+    InferenceRequest, AssistantMessage, ThinkingPolicy, ToolCall, ToolResult, ToolDefinition)
 from dante.config import DanteConfig
 from dante.local_runtime import OllamaAdapter, LlamaCppAdapter, configured_adapters
 from dante.inference import (InferenceGateway, InferenceTimeout, AdapterUnavailable, InvalidResponse,
@@ -27,8 +28,8 @@ from dante.worker import Worker
 PIN = 'a' * 64
 
 
-def model(runtime='ollama', **changes):
-    metadata = LocalModelMetadata(exact_identity='fixture-revision-1', runtime_reference='fixture:1', runtime_digest=PIN,
+def model(runtime='ollama', *, runtime_reference='fixture:1', **changes):
+    metadata = LocalModelMetadata(exact_identity='fixture-revision-1', runtime_reference=runtime_reference, runtime_digest=PIN,
         format='gguf', quantization='fixture', context_tokens=4096, tool_use=True,
         license_id='fixture-license', license_status='verified', machine_profiles={'old-pc'},
         qualification='qualified', identity_verified=True, identity_limitations=('runtime reports identity; file not exposed',),
@@ -65,9 +66,11 @@ def lcall(args='{}'):
 
 
 class Wire:
-    def __init__(self, runtime='ollama', payload=None):
+    def __init__(self, runtime='ollama', payload=None, raw_content=None, content_type='application/json'):
         self.runtime=runtime
         self.payload = payload if payload is not None else (ollama() if runtime=='ollama' else llama())
+        self.raw_content=raw_content
+        self.content_type=content_type
         self.calls=[]
         self.error=None
         self.status=200
@@ -87,7 +90,11 @@ class Wire:
         elif req.url.path=='/health': data={'status':'ok'}
         elif req.url.path=='/v1/models': data={'data':[{'id':'fixture:1'}] if self.models else []}
         else:
-            return httpx.Response(self.status, json=self.payload)
+            if self.raw_content is not None:
+                return httpx.Response(self.status, content=self.raw_content,
+                                      headers={'Content-Type':self.content_type})
+            return httpx.Response(self.status, json=self.payload,
+                                  headers={'Content-Type':self.content_type})
         return httpx.Response(200,json=data)
 
     def adapter(self):
@@ -96,12 +103,122 @@ class Wire:
 
 
 class LocalAdapterTests(unittest.TestCase):
+    def test_thinking_and_output_budget_defaults_are_explicit_and_bounded(self):
+        req = request()
+        self.assertEqual(req.thinking, ThinkingPolicy.OFF)
+        self.assertEqual(req.max_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+        self.assertGreaterEqual(DEFAULT_MAX_OUTPUT_TOKENS, 128)
+        self.assertLessEqual(DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS)
+        wire = Wire()
+        wire.adapter().complete(req)
+        body = wire.calls[-1][1]
+        self.assertEqual(body['options']['num_predict'], DEFAULT_MAX_OUTPUT_TOKENS)
+        self.assertNotIn('think', body)
+
+    def test_native_thinking_policy_is_capability_aware(self):
+        capable = model(capabilities={'thinking'})
+        for policy, expected in ((ThinkingPolicy.OFF, False), (ThinkingPolicy.ON, True)):
+            with self.subTest(policy=policy):
+                wire = Wire()
+                wire.adapter().complete(request(model=capable, thinking=policy, max_output_tokens=40))
+                body = wire.calls[-1][1]
+                self.assertIs(body['think'], expected)
+                self.assertEqual(body['options']['num_predict'], 40)
+
+        wire = Wire()
+        with self.assertRaises(PolicyDenied):
+            wire.adapter().complete(request(thinking=ThinkingPolicy.ON))
+        self.assertNotIn('/api/chat', [path for path, _ in wire.calls])
+
+    def test_thinking_text_does_not_make_empty_final_content_valid(self):
+        payload = ollama('') | {'message': {'role': 'assistant', 'content': '',
+                                             'thinking': 'private reasoning'}}
+        with self.assertRaises(InvalidResponse) as raised:
+            Wire(payload=payload).adapter().complete(request(thinking=ThinkingPolicy.OFF))
+        self.assertEqual(raised.exception.diagnostic['failed_validation_rule'], 'content_empty')
+        self.assertEqual(raised.exception.diagnostic['failed_field'], 'message.content')
+
+    def test_nonempty_final_content_remains_valid_with_thinking_metadata(self):
+        payload = ollama('final answer') | {'message': {'role': 'assistant', 'content': 'final answer',
+                                                         'thinking': 'private reasoning'}}
+        result = Wire(payload=payload).adapter().complete(request())
+        self.assertEqual(result.content, 'final answer')
+
     def test_ollama_text_unknown_cost_and_usage(self):
         result=Wire().adapter().complete(request())
         self.assertEqual(result.content,'hello')
         self.assertIsNone(result.cost)
         self.assertIsNone(result.usage.input_tokens)
         self.assertEqual(result.finish_reason,'stop')
+
+    def test_ollama_diagnostic_malformed_json_is_bounded(self):
+        wire=Wire(raw_content=b'{"done": true,')
+        with self.assertRaises(InvalidResponse) as raised:
+            wire.adapter().complete(request())
+        diagnostic=raised.exception.diagnostic
+        self.assertEqual(diagnostic['http_status'],200)
+        self.assertEqual(diagnostic['http_content_type'],'application/json')
+        self.assertEqual(diagnostic['response_bytes'],len(b'{"done": true,'))
+        self.assertFalse(diagnostic['json_decoded'])
+        self.assertEqual(diagnostic['failed_validation_rule'],'json_decode_failed')
+        self.assertEqual(diagnostic['failed_field'],'$')
+
+    def test_ollama_diagnostic_missing_or_invalid_done(self):
+        missing=ollama(); missing.pop('done')
+        for payload, actual in ((missing,'null'),(ollama() | {'done':False},'boolean')):
+            with self.subTest(payload=payload), self.assertRaises(InvalidResponse) as raised:
+                Wire(payload=payload).adapter().complete(request())
+            self.assertEqual(raised.exception.diagnostic['failed_validation_rule'],'generation_not_complete')
+            self.assertEqual(raised.exception.diagnostic['failed_field'],'done')
+            self.assertEqual(raised.exception.diagnostic['actual'],actual)
+
+    def test_ollama_diagnostic_model_mismatch(self):
+        with self.assertRaises(InvalidResponse) as raised:
+            Wire(payload=ollama() | {'model':'fixture:other'}).adapter().complete(request())
+        diagnostic=raised.exception.diagnostic
+        self.assertEqual(diagnostic['failed_validation_rule'],'model_mismatch')
+        self.assertEqual(diagnostic['failed_field'],'model')
+        self.assertEqual(diagnostic['model_value'],'fixture:other')
+
+    def test_ollama_diagnostic_missing_or_invalid_message(self):
+        missing=ollama(); missing.pop('message')
+        for payload, rule in ((missing,'message_missing'),(ollama() | {'message':'bad'},'message_not_object')):
+            with self.subTest(rule=rule), self.assertRaises(InvalidResponse) as raised:
+                Wire(payload=payload).adapter().complete(request())
+            self.assertEqual(raised.exception.diagnostic['failed_validation_rule'],rule)
+            self.assertEqual(raised.exception.diagnostic['failed_field'],'message')
+
+    def test_ollama_diagnostic_invalid_content(self):
+        payload=ollama() | {'message':{'role':'assistant','content':123}}
+        with self.assertRaises(InvalidResponse) as raised:
+            Wire(payload=payload).adapter().complete(request())
+        diagnostic=raised.exception.diagnostic
+        self.assertEqual(diagnostic['failed_validation_rule'],'content_not_string')
+        self.assertEqual(diagnostic['failed_field'],'message.content')
+        self.assertEqual(diagnostic['content_type'],'integer')
+        self.assertIsNone(diagnostic['content_length'])
+
+    def test_ollama_diagnostic_invalid_tool_calls(self):
+        payload=ollama() | {'message':{'role':'assistant','content':'','tool_calls':{}}}
+        with self.assertRaises(InvalidResponse) as raised:
+            Wire(payload=payload).adapter().complete(request())
+        diagnostic=raised.exception.diagnostic
+        self.assertEqual(diagnostic['failed_validation_rule'],'tool_calls_not_array')
+        self.assertEqual(diagnostic['failed_field'],'message.tool_calls')
+        self.assertEqual(diagnostic['tool_calls_type'],'object')
+
+    def test_ollama_diagnostic_never_contains_generated_or_thinking_text(self):
+        secret_output='GENERATED_CONTENT_DO_NOT_LOG'
+        secret_thinking='PRIVATE_THINKING_DO_NOT_LOG'
+        payload=ollama(secret_output) | {'done':False, 'message':{'role':'assistant',
+            'content':secret_output, 'thinking':secret_thinking}}
+        with self.assertRaises(InvalidResponse) as raised:
+            Wire(payload=payload).adapter().complete(request())
+        diagnostic=json.dumps(raised.exception.diagnostic)
+        self.assertNotIn(secret_output,diagnostic)
+        self.assertNotIn(secret_thinking,diagnostic)
+        self.assertEqual(raised.exception.diagnostic['content_length'],len(secret_output))
+        self.assertEqual(raised.exception.diagnostic['thinking_length'],len(secret_thinking))
 
     def test_ollama_usage_preserved_not_summed(self):
         payload=ollama()

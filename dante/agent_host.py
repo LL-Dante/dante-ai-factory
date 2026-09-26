@@ -6,7 +6,8 @@ from typing import Any
 from dante.acceptance import AcceptanceContract, AcceptanceResult, ObservedAcceptance, continuation_prompt
 from dante.contracts import PrivacyClass, Task, TaskStatus
 from dante.inference import InferenceGateway, InferenceResult
-from dante.contracts.inference import InferenceRequest, ToolDefinition
+from dante.contracts.inference import (DEFAULT_MAX_OUTPUT_TOKENS, InferenceRequest,
+    ThinkingPolicy, ToolDefinition)
 from dante.ledger import TaskLedger
 from dante.recovery import ReconciliationRequired
 from dante.privacy import PrivacyGate
@@ -32,7 +33,10 @@ class AgentHostFoundation:
         self.ledger.transition(task.task_id, TaskStatus.PLANNED, current_step="planned")
         return self.ledger.transition(task.task_id, TaskStatus.RUNNING, current_step="routing")
 
-    def infer(self, task_id: str, content: str, capabilities: set[str], *, tools: tuple[ToolDefinition, ...] = (), required_context_tokens: int | None = None) -> InferenceResult:
+    def infer(self, task_id: str, content: str, capabilities: set[str], *, tools: tuple[ToolDefinition, ...] = (),
+              required_context_tokens: int | None = None,
+              max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+              thinking: ThinkingPolicy = ThinkingPolicy.OFF) -> InferenceResult:
         task = self.ledger.get_task(task_id)
         trace = TraceContext.create(task.task_id, task.trace_id)
         token = use_trace(trace)
@@ -44,7 +48,8 @@ class AgentHostFoundation:
             if self.continuity is not None:
                 from dante.continuity import ContinuitySignal, Disposition
                 outcome = self.continuity.infer(task, privacy, [{'role': 'user', 'content': content}],
-                    capabilities, tools=tools, context_tokens=required_context_tokens)
+                    capabilities, tools=tools, context_tokens=required_context_tokens,
+                    max_output_tokens=max_output_tokens, thinking=thinking)
                 if outcome.disposition != Disposition.CONTINUE_NOW:
                     raise ContinuitySignal(outcome)
                 return outcome.response
@@ -52,7 +57,8 @@ class AgentHostFoundation:
             self.ledger.set_route(decision)
             return self.gateway.infer(decision, InferenceRequest(
                 model=decision.selected_model, messages=[{"role": "user", "content": content}],
-                tools=tools, task_id=task.task_id, trace_id=task.trace_id))
+                tools=tools, task_id=task.task_id, trace_id=task.trace_id,
+                max_output_tokens=max_output_tokens, thinking=thinking))
         finally:
             reset_trace(token)
 

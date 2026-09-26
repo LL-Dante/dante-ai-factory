@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
@@ -21,7 +22,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from dante.contracts import ModelRef, PrivacyClass
-from dante.contracts.continuity import BackendState, ContinuityPolicy, ExecutionPolicy
+from dante.contracts.inference import DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS, ThinkingPolicy
+from dante.contracts.continuity import ContinuityPolicy, ExecutionPolicy
 from dante.contracts.qualification import (
     QualificationIdentity, QualificationState, RuntimeObservation,
 )
@@ -30,6 +32,7 @@ from dante.node0 import Node0Runtime, build_node0
 from dante.node_probe import probe_machine
 from dante.nvidia_probe import discover_gpu_uuids
 from dante.ollama_qualification import OllamaQualificationConfig, ProbeFailure
+from dante.inference import inference_cancellation
 from dante.recovery import digest
 from dante.telemetry import JsonlAudit
 
@@ -41,6 +44,7 @@ class SupervisorConfig(BaseModel):
     ledger_path: Path
     evidence_path: Path
     audit_path: Path
+    workload_path: Path | None = None
     state_path: Path
     config_path: Path
     model: ModelRef
@@ -91,11 +95,18 @@ class SupervisorConfig(BaseModel):
         if not qualification.model_store.is_dir():
             raise ValueError('Configured model store is unavailable')
         paths = raw
+        config_file = Path(os.path.abspath(os.fspath(path)))
+        ledger_path = _absolute_from_config(paths['ledger_path'], config_file)
+        evidence_path = _absolute_from_config(paths['evidence_path'], config_file)
+        audit_path = _absolute_from_config(paths['audit_path'], config_file)
+        configured_state = state_path or paths.get('state_path')
+        snapshot_path = (_absolute_from_config(configured_state, config_file)
+            if configured_state else ledger_path.parent / 'supervisor-state.json')
         data = {'node_uuid': node_id, 'machine_profile': paths['machine_profile'],
-            'ledger_path': Path(paths['ledger_path']), 'evidence_path': Path(paths['evidence_path']),
-            'audit_path': Path(paths['audit_path']),
-            'state_path': state_path or Path(paths['ledger_path']).parent / 'supervisor-state.json',
-            'config_path': path.resolve(), 'model': model, 'qualification': qualification}
+            'ledger_path': ledger_path, 'evidence_path': evidence_path,
+            'workload_path': ledger_path.parent / 'workloads.db',
+            'audit_path': audit_path, 'state_path': snapshot_path,
+            'config_path': config_file, 'model': model, 'qualification': qualification}
         allowed_settings = {'health_interval_s', 'startup_timeout_s', 'shutdown_timeout_s',
             'restart_window_s', 'max_restarts', 'restart_backoff_s', 'max_backoff_s',
             'stable_reset_s', 'audit_max_bytes'}
@@ -104,6 +115,14 @@ class SupervisorConfig(BaseModel):
             raise ValueError('Invalid supervisor settings')
         data.update(supervisor_settings)
         return cls.model_validate(data)
+
+
+def _absolute_from_config(value: str | Path, config_file: Path) -> Path:
+    """Normalize configured paths lexically, preserving the selected filesystem alias."""
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = config_file.parent / candidate
+    return Path(os.path.abspath(os.fspath(candidate)))
 
 class ProcessHandle(Protocol):
     pid: int
@@ -121,6 +140,10 @@ class Runtime(Protocol):
 class InstanceLock(Protocol):
     def acquire(self) -> bool: ...
     def release(self) -> None: ...
+
+
+class Node0InferenceBusy(RuntimeError):
+    """The single GPU inference slot is already occupied."""
 
 
 def _failure_code(error: Exception) -> str:
@@ -228,6 +251,11 @@ class Node0Supervisor:
     _last_audited_ready: bool | None = None
     _started_at: float | None = None
     _snapshot_lock: threading.RLock = field(default_factory=threading.RLock)
+    _inference_lock: threading.Lock = field(default_factory=threading.Lock)
+    control_server: object | None = None
+    workload_store: object | None = None
+    orchestrator: object | None = None
+    _orchestrator_thread: threading.Thread | None = None
 
     def __post_init__(self):
         # The existing shared gate is the routing authority. Its identity source
@@ -252,6 +280,10 @@ class Node0Supervisor:
             audit_path=config.audit_path, seed_identity=seed, qualification=config.qualification,
             models=[config.model], machine_profile=config.machine_profile,
             policy=ContinuityPolicy(mode=ExecutionPolicy.LOCAL_ONLY), audit=audit)
+        # A control-plane inference has a hard runtime I/O ceiling. Keep the
+        # local adapter's response-size bound while avoiding any unbounded call.
+        node.adapter.profile = node.adapter.profile.model_copy(update={
+            'timeout_s': min(node.adapter.profile.timeout_s, 30.0)})
         probe = node.probe
         return cls(config, node, probe.runtime, probe.observer, probe.http,
                    audit)
@@ -514,6 +546,7 @@ class Node0Supervisor:
             return 2
         self.stop_event.clear()
         try:
+            self._start_operator_services()
             while not self.stop_event.wait(self.config.health_interval_s):
                 try:
                     self.health_check()
@@ -529,6 +562,119 @@ class Node0Supervisor:
             self.stop()
         return 0
 
+    def _start_operator_services(self) -> None:
+        from dante.node0_control import Node0ControlServer, Node0ControlService
+        from dante.workload import Node0InferenceExecutor, WorkloadOrchestrator, WorkloadStore
+
+        path = self.config.workload_path or self.config.ledger_path.with_name('workloads.db')
+        self.workload_store = WorkloadStore(path, audit=self.audit)
+        executor = Node0InferenceExecutor(self, expected_model_id=self.config.model.model_id,
+            expected_runtime_reference=self.config.qualification.model_reference,
+            expected_digest=self.config.qualification.model_digest)
+        self.orchestrator = WorkloadOrchestrator(self.workload_store, executor, max_gpu_jobs=1,
+            worker_id='node0-' + str(self.config.node_uuid))
+        self.orchestrator.start()
+        self._orchestrator_thread = threading.Thread(target=self.orchestrator.serve,
+            name='dante-node0-workload-orchestrator', daemon=True)
+        self._orchestrator_thread.start()
+        self.control_server = Node0ControlServer(Node0ControlService(self,
+            workload_store=self.workload_store, orchestrator=self.orchestrator))
+        try:
+            self.control_server.start()
+        except Exception:
+            self.orchestrator.request_stop()
+            self._orchestrator_thread.join(timeout=2)
+            self.control_server = None
+            self.orchestrator = None
+            self._orchestrator_thread = None
+            self.workload_store = None
+            raise
+        self.audit.write('node0.control.started', transport='windows_named_pipe',
+                         workload_state='ready')
+
+    def operator_status(self) -> dict:
+        gate_accepted = False
+        if self._ready and self.state == 'QUALIFIED' and self.runtime_healthy:
+            try:
+                self.node.registry.require_automatic(self.config.model)
+                gate_accepted = True
+            except (ValueError, ProbeFailure):
+                gate_accepted = False
+        snapshot = self.snapshot()
+        continuity = self.node.continuity
+        continuity_status = (continuity.read_only_status(
+            context_tokens=self.config.qualification.context_tokens)
+            if hasattr(continuity, 'read_only_status') else [])
+        if not gate_accepted:
+            for provider_state in continuity_status:
+                if provider_state.get('provider') == self.config.model.provider_id:
+                    provider_state['route_admissible'] = False
+                    provider_state['denial_reason'] = 'qualification_or_machine'
+        return {
+            'state': snapshot.state,
+            'runtime_state': snapshot.runtime_state,
+            'runtime_version': snapshot.runtime_version,
+            'runtime_pid': snapshot.runtime_pid,
+            'model_reference': snapshot.model_reference,
+            'model_digest': snapshot.expected_model_digest,
+            'observed_model_digest': snapshot.observed_model_digest,
+            'qualification_state': snapshot.qualification_state,
+            'qualification_id': snapshot.qualification_id,
+            'qualification_current': gate_accepted,
+            'evidence_valid': gate_accepted,
+            'gate_accepted': gate_accepted,
+            'gpu_uuid': snapshot.gpu_identity,
+            'driver_version': snapshot.driver_version,
+            'ready_for_local_routing': bool(snapshot.ready_for_local_routing and gate_accepted),
+            'last_health_check': snapshot.last_health_check,
+            'updated_at': snapshot.updated_at,
+            'last_failure': snapshot.last_failure,
+            'continuity': continuity_status,
+        }
+
+    def operator_health(self) -> dict:
+        status = self.operator_status()
+        process = self.runtime.process
+        alive = bool(process is not None and process.poll() is None)
+        result = {
+            'healthy': False,
+            'qualification_id': status.get('qualification_id'),
+            'qualification_current': status.get('qualification_current', False),
+            'ready_for_local_routing': status.get('ready_for_local_routing', False),
+            'runtime': 'ollama', 'runtime_version': None,
+            'runtime_reachable': False, 'model_present': False,
+            'model_reference': self.config.qualification.model_reference,
+            'model_digest': self.config.qualification.model_digest,
+            'gpu_uuid': status.get('gpu_uuid'), 'gpu_vram_bytes': 0,
+            'gpu_execution_verified': False,
+        }
+        if not alive or not status.get('gate_accepted'):
+            return result
+        try:
+            version = self.http.get('/api/version').get('version')
+            tags = self.http.get('/api/tags').get('models')
+            running = self.http.get('/api/ps').get('models')
+            if not isinstance(tags, list) or not isinstance(running, list):
+                return result
+            ref = self.config.qualification.model_reference
+            digest = self.config.qualification.model_digest
+            exact = [item for item in tags if isinstance(item, dict)
+                and item.get('name') == ref
+                and str(item.get('digest', '')).removeprefix('sha256:').lower() == digest
+                and isinstance(item.get('details'), dict)
+                and item['details'].get('quantization_level') == self.config.qualification.quantization]
+            resident = [item for item in running if isinstance(item, dict)
+                and item.get('name') == ref and isinstance(item.get('size_vram'), int)]
+            vram = max((item['size_vram'] for item in resident), default=0)
+            result.update(runtime_version=version, runtime_reachable=version == status.get('runtime_version'),
+                model_present=len(exact) == 1, gpu_vram_bytes=vram,
+                gpu_execution_verified=bool(vram > 0 and status.get('gpu_uuid') == self.config.qualification.gpu_uuid))
+            result['healthy'] = bool(alive and result['runtime_reachable'] and result['model_present']
+                and result['qualification_current'] and result['ready_for_local_routing'])
+        except Exception:
+            return result
+        return result
+
     def stop(self) -> None:
         if self.state == 'STOPPED' and not self._lock_acquired:
             return
@@ -536,6 +682,21 @@ class Node0Supervisor:
         self._transition('STOPPING')
         self.stop_event.set()
         try:
+            if self.control_server is not None:
+                try:
+                    self.control_server.stop(timeout_s=min(35, self.config.shutdown_timeout_s + 20))
+                except Exception:
+                    self.audit.write('node0.control.stop.failed')
+                self.control_server = None
+            if self.orchestrator is not None:
+                try:
+                    self.orchestrator.stop(drain_timeout_s=min(35, self.config.shutdown_timeout_s + 20))
+                except Exception:
+                    self.audit.write('node0.workload.stop.failed')
+                if self._orchestrator_thread is not None:
+                    self._orchestrator_thread.join(timeout=min(35, self.config.shutdown_timeout_s + 20))
+                self.orchestrator = None
+                self._orchestrator_thread = None
             stopped = self.runtime.stop()
             self.runtime_healthy = False
             self.qualification_state = 'unknown' if not stopped else self.qualification_state
@@ -546,13 +707,66 @@ class Node0Supervisor:
             self.lock.release()
             self._lock_acquired = False
 
-    def infer(self, prompt: str):
-        if not self._ready or self.state != 'QUALIFIED':
-            raise ValueError('Node 0 is not ready for local routing')
-        self.node.gate.current = self._routing_identity
-        self.node.continuity.observe('ollama', BackendState.AVAILABLE)
-        task = self.node.host.start('Node 0 supervised inference', '.', PrivacyClass.PUBLIC)
-        return self.node.host.infer(task.task_id, prompt, set())
+    def infer(self, prompt: str, *, model_reference: str | None = None,
+              context_tokens: int | None = None, max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+              thinking: ThinkingPolicy = ThinkingPolicy.OFF,
+              cancellation=None):
+        if model_reference is not None and model_reference != self.config.qualification.model_reference:
+            raise ValueError('Requested model differs from the configured Node 0 model')
+        if (not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 20000
+                or isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int)
+                or not 1 <= max_output_tokens <= MAX_OUTPUT_TOKENS):
+            raise ValueError('Invalid bounded inference request')
+        try:
+            thinking = ThinkingPolicy(thinking)
+        except (ValueError, TypeError):
+            raise ValueError('Invalid thinking policy') from None
+        if context_tokens is None:
+            context_tokens = self.config.qualification.context_tokens
+        if (isinstance(context_tokens, bool) or not isinstance(context_tokens, int)
+                or not 1 <= context_tokens <= self.config.qualification.context_tokens):
+            raise ValueError('Requested context exceeds Node 0 qualification')
+        if not self._inference_lock.acquire(blocking=False):
+            raise Node0InferenceBusy('Node 0 inference is busy')
+        task = None
+        try:
+            if not self._ready or self.state != 'QUALIFIED' or not self.runtime_healthy:
+                raise ValueError('Node 0 is not ready for local routing')
+            process = self.runtime.process
+            if process is None or process.poll() is not None:
+                raise ProbeFailure('unavailable')
+            identity = self._routing_identity(self.config.model)
+            if (identity.artifact_sha256 != self.config.qualification.model_digest
+                    or identity.runtime.version != self.observed_identity.runtime.version
+                    or not any(gpu.uuid == self.config.qualification.gpu_uuid for gpu in identity.machine.gpus or ())):
+                raise ProbeFailure('assertion_failed')
+            self.node.gate.current = self._routing_identity
+            task = self.node.host.start('Node 0 supervised inference', '.', PrivacyClass.INTERNAL)
+            context = inference_cancellation(cancellation) if cancellation is not None else nullcontext()
+            with context:
+                response = self.node.host.infer(task.task_id, prompt, set(),
+                    required_context_tokens=context_tokens, max_output_tokens=max_output_tokens,
+                    thinking=thinking)
+            if not response.content.strip():
+                raise ValueError('Local inference returned an empty response')
+            self.node.host.complete(task.task_id)
+            return response
+        except Exception as exc:
+            if task is not None:
+                try:
+                    from dante.contracts import TaskStatus
+                    from dante.continuity import ContinuitySignal
+                    current = self.node.ledger.get_task(task.task_id)
+                    if current.status in {TaskStatus.RUNNING, TaskStatus.VERIFYING}:
+                        terminal = isinstance(exc, ContinuitySignal) and exc.outcome.disposition.value == 'terminal'
+                        self.node.ledger.transition(task.task_id,
+                            TaskStatus.FAILED_TERMINAL if terminal else TaskStatus.FAILED_RETRYABLE,
+                            current_step='inference-failed', metadata={'error_type': type(exc).__name__})
+                except Exception:
+                    pass
+            raise
+        finally:
+            self._inference_lock.release()
 
 
 def install_user_startup(config_path: Path, *, repository: Path) -> str:

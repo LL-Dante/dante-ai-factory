@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import http.client
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import math
 import time
@@ -21,10 +23,12 @@ from dante.telemetry import JsonlAudit
 class InferenceError(RuntimeError):
     """Safe, typed failure; provider payloads must not be included."""
 
-    def __init__(self, message='', *, retry_after: float | None = None, retry_at: float | None = None):
+    def __init__(self, message='', *, retry_after: float | None = None, retry_at: float | None = None,
+                 diagnostic: dict | None = None):
         super().__init__(message)
         self.retry_after = retry_after if retry_after is not None and math.isfinite(retry_after) and retry_after >= 0 else None
         self.retry_at = retry_at if retry_at is not None and math.isfinite(retry_at) and retry_at >= 0 else None
+        self.diagnostic = diagnostic if isinstance(diagnostic, dict) else None
 
 
 class AdapterUnavailable(InferenceError):
@@ -69,6 +73,22 @@ class QualificationDenied(PolicyDenied):
 
 class ConfigurationDenied(PolicyDenied):
     pass
+
+
+class InferenceCancelled(RuntimeError):
+    """A caller cancelled an in-flight local inference request."""
+
+
+_inference_cancellation: ContextVar[object | None] = ContextVar('dante_inference_cancellation', default=None)
+
+
+@contextmanager
+def inference_cancellation(event):
+    token = _inference_cancellation.set(event)
+    try:
+        yield
+    finally:
+        _inference_cancellation.reset(token)
 
 
 def retry_after_seconds(value: str | None) -> float | None:
@@ -285,7 +305,11 @@ class InferenceGateway:
             except ValueError:
                 raise QualificationDenied('Local model qualification failed') from None
             try:
-                result = adapter.complete(request.model_copy(update={'model': model}))
+                adapted_request = request.model_copy(update={'model': model})
+                cancellation = _inference_cancellation.get()
+                cancellable = getattr(adapter, 'complete_cancellable', None)
+                result = (cancellable(adapted_request, cancellation) if cancellation is not None and cancellable
+                          else adapter.complete(adapted_request))
                 if result.model != model:
                     raise InvalidResponse('Inference adapter returned a mismatched model')
                 if result.cost is not None and result.cost != 0:

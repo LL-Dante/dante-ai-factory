@@ -57,6 +57,7 @@ def parse_ollama_tags(payload):
             "name": entry.get("name") or "Unknown (not reported)",
             "size": format_bytes(entry.get("size")),
             "quantization": details.get("quantization_level") or "Unknown (not reported)",
+            "max_context": format_count(details.get("context_length")),
         })
     return models
 
@@ -84,6 +85,40 @@ def build_ollama_status(online, tags_payload, ps_payload, errors=()):
         "resident": parse_ollama_ps(ps_payload),
         "errors": list(errors),
     }
+
+
+def build_model_rows(snapshot, ollama_state):
+    """Assemble Models-page rows; metadata max context and resident runtime
+    context are separate columns and missing facts stay explicitly unknown."""
+    rows, seen = [], set()
+    for runtime in (snapshot.runtimes if snapshot else ()):
+        for model in runtime.installed_models:
+            rows.append((model.runtime_reference, runtime.endpoint, "Unknown (not reported)", "Unknown (not reported)",
+                         display_fact(model.quantization), "Unknown (not reported)", "Unknown (not reported)",
+                         "Unknown (not reported)",
+                         display_fact(model.size_bytes, scale=1 / (1024 ** 3), suffix=" GiB"), "Unknown (not reported)"))
+            seen.add(model.runtime_reference)
+    online = bool(ollama_state.get("online"))
+    resident_by_name = {m.get("name"): m for m in ollama_state.get("resident", [])}
+    for model in ollama_state.get("installed", []):
+        name = model.get("name", "Unknown (not reported)")
+        if name in seen:
+            continue
+        resident = resident_by_name.get(name)
+        if resident:
+            runtime_context = resident.get("context_length", "Unknown (not reported)")
+        elif online:
+            runtime_context = "NOT LOADED (unknown)"
+        else:
+            runtime_context = "Unknown (not reported)"
+        rows.append((name, OLLAMA_ENDPOINT, "AVAILABLE" if online else "OFFLINE",
+                     "LOADED" if resident else ("NOT LOADED" if online else "Unknown (not reported)"),
+                     model.get("quantization", "Unknown (not reported)"),
+                     model.get("max_context", "Unknown (not reported)"),
+                     runtime_context,
+                     resident.get("size_vram", "Unknown (not reported)") if resident else "Unknown (not reported)",
+                     model.get("size", "Unknown (not reported)"), "Unknown (not reported)"))
+    return rows
 
 
 def fetch_ollama(path, timeout=3.0):
@@ -503,28 +538,11 @@ class ControlCenterApp:
         threading.Thread(target=run, daemon=True).start()
 
     def page_models(self):
-        rows, seen = [], set()
-        for runtime in (self.snapshot.runtimes if self.snapshot else ()):
-            for model in runtime.installed_models:
-                rows.append((model.runtime_reference, runtime.endpoint, "Unknown (not reported)", "Unknown (not reported)",
-                             display_fact(model.quantization), "Unknown (not reported)", "Unknown (not reported)",
-                             display_fact(model.size_bytes, scale=1 / (1024 ** 3), suffix=" GiB"), "Unknown (not reported)"))
-                seen.add(model.runtime_reference)
-        resident_by_name = {m.get("name"): m for m in self.ollama.get("resident", [])}
-        for model in self.ollama.get("installed", []):
-            name = model.get("name", "Unknown (not reported)")
-            if name in seen:
-                continue
-            resident = resident_by_name.get(name)
-            online = bool(self.ollama.get("online"))
-            rows.append((name, OLLAMA_ENDPOINT, "AVAILABLE" if online else "OFFLINE",
-                         "LOADED" if resident else ("NOT LOADED" if online else "Unknown (not reported)"),
-                         model.get("quantization", "Unknown (not reported)"),
-                         resident.get("context_length", "Unknown (not reported)") if resident else "Unknown (not reported)",
-                         resident.get("size_vram", "Unknown (not reported)") if resident else "Unknown (not reported)",
-                         model.get("size", "Unknown (not reported)"), "Unknown (not reported)"))
-        tree = self._tree(("model", "endpoint", "availability", "residency", "quantization", "context", "vram", "size", "slot"),
-                          ("Model", "Runtime endpoint", "Availability", "Loaded", "Quantization", "Context length", "VRAM", "Size", "Slot state"))
+        rows = build_model_rows(self.snapshot, self.ollama)
+        tree = self._tree(
+            ("model", "endpoint", "availability", "residency", "quantization", "max_context", "runtime_context", "vram", "size", "slot"),
+            ("Model", "Runtime endpoint", "Availability", "Loaded", "Quantization",
+             "Max context (metadata)", "Runtime context (loaded)", "VRAM", "Size", "Slot state"))
         for row in rows:
             tree.insert("", "end", values=row)
         if not rows:

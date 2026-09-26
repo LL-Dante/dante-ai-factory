@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from dante.control_center_gui import (
     OLLAMA_ENDPOINT,
+    build_model_rows,
     build_ollama_status,
     display_fact,
     format_bytes,
@@ -85,13 +86,19 @@ class OllamaStatusHelpersTests(unittest.TestCase):
     def test_parse_ollama_tags_missing_size_stays_explicit(self):
         rows = parse_ollama_tags({"models": [{"name": "qwen3.5-local:32b"}]})
         self.assertEqual(rows, [{"name": "qwen3.5-local:32b", "size": "Unknown (not reported)",
-                                 "quantization": "Unknown (not reported)"}])
+                                  "quantization": "Unknown (not reported)",
+                                  "max_context": "Unknown (not reported)"}])
 
     def test_parse_ollama_tags_renders_reported_size(self):
         rows = parse_ollama_tags({"models": [{"name": "m", "size": round(6 * 1024 ** 3),
                                                "details": {"quantization_level": "Q3_K_M"}}]})
         self.assertEqual(rows[0]["size"], "6.0 GiB")
         self.assertEqual(rows[0]["quantization"], "Q3_K_M")
+        self.assertEqual(rows[0]["max_context"], "Unknown (not reported)")
+
+    def test_parse_ollama_tags_reports_metadata_max_context(self):
+        rows = parse_ollama_tags({"models": [{"name": "m", "details": {"context_length": 40960}}]})
+        self.assertEqual(rows[0]["max_context"], "40960")
 
     def test_parse_ollama_ps_missing_facts_stay_explicit(self):
         rows = parse_ollama_ps({"models": [{"name": "qwen3.5-local:32b"}]})
@@ -106,7 +113,8 @@ class OllamaStatusHelpersTests(unittest.TestCase):
         self.assertEqual(state["online"], True)
         self.assertEqual(state["endpoint"], OLLAMA_ENDPOINT)
         self.assertEqual(state["installed"], [{"name": "a", "size": "Unknown (not reported)",
-                                                "quantization": "Unknown (not reported)"}])
+                                                "quantization": "Unknown (not reported)",
+                                                "max_context": "Unknown (not reported)"}])
         self.assertEqual(state["resident"], [{"name": "a", "size_vram": "Unknown (not reported)", "context_length": "Unknown (not reported)"}])
         self.assertEqual(state["errors"], [])
 
@@ -122,6 +130,68 @@ class OllamaStatusHelpersTests(unittest.TestCase):
         self.assertEqual(parse_ollama_tags({"models": [None, "x"]}), [])
         self.assertEqual(parse_ollama_ps(None), [])
         self.assertEqual(parse_ollama_ps({"models": [42]}), [])
+
+
+class ModelRowsContextTests(unittest.TestCase):
+    def test_loaded_model_shows_distinct_max_and_runtime_context(self):
+        state = build_ollama_status(True,
+                                    {"models": [{"name": "m1", "details": {"context_length": 40960}}]},
+                                    {"models": [{"name": "m1", "context_length": 8192}]})
+        (row,) = build_model_rows(None, state)
+        self.assertEqual(row[3], "LOADED")
+        self.assertEqual(row[5], "40960", "metadata max context from /api/tags")
+        self.assertEqual(row[6], "8192", "runtime context from /api/ps")
+        self.assertNotEqual(row[5], row[6])
+
+    def test_not_loaded_model_runtime_context_says_not_loaded_unknown(self):
+        state = build_ollama_status(True,
+                                    {"models": [{"name": "m1", "details": {"context_length": 40960}}]},
+                                    {"models": []})
+        (row,) = build_model_rows(None, state)
+        self.assertEqual(row[3], "NOT LOADED")
+        self.assertEqual(row[5], "40960")
+        self.assertEqual(row[6], "NOT LOADED (unknown)")
+
+    def test_missing_metadata_max_context_stays_explicit_unknown(self):
+        state = build_ollama_status(True, {"models": [{"name": "m1"}]},
+                                    {"models": [{"name": "m1", "context_length": 8192}]})
+        (row,) = build_model_rows(None, state)
+        self.assertEqual(row[5], "Unknown (not reported)")
+        self.assertEqual(row[6], "8192")
+
+    def test_loaded_without_reported_runtime_context_stays_explicit_unknown(self):
+        state = build_ollama_status(True,
+                                    {"models": [{"name": "m1", "details": {"context_length": 40960}}]},
+                                    {"models": [{"name": "m1"}]})
+        (row,) = build_model_rows(None, state)
+        self.assertEqual(row[5], "40960")
+        self.assertEqual(row[6], "Unknown (not reported)")
+
+    def test_offline_keeps_residency_explicit_without_inferring_load(self):
+        state = build_ollama_status(False, {"models": [{"name": "m1", "details": {"context_length": 40960}}]}, None)
+        (row,) = build_model_rows(None, state)
+        self.assertEqual(row[2], "OFFLINE")
+        self.assertEqual(row[3], "Unknown (not reported)")
+        self.assertEqual(row[5], "40960")
+        self.assertEqual(row[6], "Unknown (not reported)")
+
+    def test_inventory_rows_use_ten_fields_with_size_in_size_column(self):
+        size = SimpleNamespace(kind="measured", value=3758096384, reason=None, source="")
+        model = SimpleNamespace(runtime_reference="m1", quantization=None, size_bytes=size)
+        runtime = SimpleNamespace(endpoint="http://runtime", installed_models=[model])
+        snapshot = SimpleNamespace(runtimes=[runtime])
+        (row,) = build_model_rows(snapshot, {"online": False, "installed": [], "resident": []})
+        self.assertEqual(len(row), 10)
+        self.assertEqual(row[8], "3.5 GiB")
+        self.assertEqual(row[0], "m1")
+        self.assertEqual(row[5], "Unknown (not reported)")
+        self.assertEqual(row[6], "Unknown (not reported)")
+
+    def test_no_snapshot_rows_do_not_infer_context(self):
+        state = build_ollama_status(True, {"models": [{"name": "m1"}]}, {"models": []})
+        (row,) = build_model_rows(None, state)
+        self.assertEqual(row[5], "Unknown (not reported)")
+        self.assertEqual(row[6], "NOT LOADED (unknown)")
 
 
 if __name__ == "__main__":

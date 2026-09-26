@@ -1,0 +1,12 @@
+{
+  "poll_seconds": 2,
+  "telemetry_log_seconds": 60,
+  "retention_days": 30,
+  "alert_cooldown_seconds": 900,
+  "thresholds": {
+    "cpu.temperature_c": {"warning": 85, "critical": 95},
+    "gpu.temperature_c": {"warning": 80, "critical": 87},
+    "gpu.power_w": {"warning": 330, "critical": 355},
+    "storage.lexar_nm790.temperature_c": {"warning": 70, "critical": 80}
+  }
+}

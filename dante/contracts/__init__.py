@@ -163,7 +163,11 @@ class EvalRun(StrictModel):
     artifact_ids: list[str] = Field(default_factory=list)
 
 
+from dante.contracts.agents import AgentDefinition, AgentModelTarget, AgentRetryPolicy, AgentResult, AgentTaskPayload
+
+
 __all__ = [
-    "Approval", "Artifact", "CostClass", "EvalRun", "LifecycleState", "ModelRef",
+    "Approval", "AgentDefinition", "AgentModelTarget", "AgentRetryPolicy", "AgentResult",
+    "AgentTaskPayload", "Artifact", "CostClass", "EvalRun", "LifecycleState", "ModelRef",
     "PrivacyClass", "RouteDecision", "Task", "TaskStatus", "ToolManifest", "new_id", "utc_now",
 ]

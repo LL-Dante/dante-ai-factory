@@ -29,7 +29,8 @@ PIPE_ACK_TIMEOUT_S = 5.0
 _ALLOWED_OPERATIONS = {
     "status", "health", "infer", "workload_submit", "workload_status",
     "workload_result", "workload_cancel", "workload_events", "workload_list",
-    "orchestrator_status",
+    "orchestrator_status", "agent_list", "agent_describe", "agent_submit",
+    "agent_job", "agent_job_cancel", "agent_result",
 }
 
 _DIAGNOSTIC_KEYS = {
@@ -95,10 +96,12 @@ class ControlServerStartupError(RuntimeError):
 class Node0ControlService:
     """Typed operations over the already-running production supervisor."""
 
-    def __init__(self, supervisor, *, workload_store=None, orchestrator=None):
+    def __init__(self, supervisor, *, workload_store=None, orchestrator=None,
+                 agent_registry=None):
         self.supervisor = supervisor
         self.workload_store = workload_store
         self.orchestrator = orchestrator
+        self.agent_registry = agent_registry
 
     def dispatch(self, request):
         if not isinstance(request, dict) or not isinstance(request.get("op"), str):
@@ -117,6 +120,12 @@ class Node0ControlService:
             "workload_events": self._workload_events,
             "workload_list": self._workload_list,
             "orchestrator_status": self._orchestrator_status,
+            "agent_list": self._agent_list,
+            "agent_describe": self._agent_describe,
+            "agent_submit": self._agent_submit,
+            "agent_job": self._agent_job,
+            "agent_job_cancel": self._agent_job_cancel,
+            "agent_result": self._agent_result,
         }
         return {"ok": True, "result": handlers[operation](request)}
 
@@ -217,6 +226,8 @@ class Node0ControlService:
             spec = WorkloadSpec.model_validate(request["spec"])
         except Exception:
             raise ControlError("invalid_workload_spec") from None
+        if spec.job_type != 'LOCAL_INFERENCE':
+            raise ControlError('agent_task_requires_agent_submit', status=403)
         cfg = self.supervisor.config
         metadata = cfg.model.local_metadata
         if (not metadata or spec.model.model_id != cfg.model.model_id
@@ -262,6 +273,132 @@ class Node0ControlService:
         if self.orchestrator is None:
             return {"state": "STOPPED"}
         return {"state": self.orchestrator.state, "worker_id": self.orchestrator.worker_id}
+
+    def _require_agents(self):
+        if self.agent_registry is None:
+            raise ControlError('agent_service_unavailable', status=503)
+        self._require_workload()
+        return self.agent_registry
+
+    def _agent_list(self, request):
+        self._only(request, set())
+        return [definition.model_dump(mode='json') for definition in self._require_agents().list()]
+
+    def _agent_describe(self, request):
+        self._only(request, {'agent_id'})
+        try:
+            definition = self._require_agents().describe(request['agent_id'])
+        except (KeyError, LookupError):
+            raise ControlError('unknown_agent', status=404) from None
+        return definition.model_dump(mode='json')
+
+    def _agent_submit(self, request):
+        required = {'agent_id', 'objective'}
+        allowed = required | {'op', 'context', 'requested_output_tokens', 'idempotency_key'}
+        if not required.issubset(request) or set(request) - allowed:
+            raise ControlError('invalid_request_fields')
+        from dante.agent_runner import AgentUnavailable, definition_digest
+        from dante.contracts.agents import AgentTaskPayload
+        from dante.workload import ModelRequirement, WorkloadSpec
+
+        registry = self._require_agents()
+        agent_id = request['agent_id']
+        if not isinstance(agent_id, str):
+            raise ControlError('unknown_agent', status=404)
+        try:
+            registration = registry.require(agent_id)
+        except AgentUnavailable:
+            raise ControlError('unknown_agent', status=404) from None
+        definition = registration.definition
+        snapshot = self.supervisor.operator_status()
+        target = definition.model_target
+        cfg = self.supervisor.config
+        if (not snapshot.get('ready_for_local_routing') or not snapshot.get('gate_accepted')
+                or target.model_id != cfg.model.model_id
+                or target.runtime_reference != cfg.qualification.model_reference
+                or target.digest_sha256 != cfg.qualification.model_digest
+                or target.context_tokens > cfg.qualification.context_tokens):
+            raise ControlError('qualification_or_runtime_not_ready', status=503)
+        requested = request.get('requested_output_tokens')
+        if requested is None:
+            output_tokens = definition.output_token_budget
+        elif (isinstance(requested, bool) or not isinstance(requested, int)
+                or not 64 <= requested <= definition.output_token_budget):
+            raise ControlError('invalid_output_budget')
+        else:
+            output_tokens = requested
+        try:
+            payload = AgentTaskPayload(
+                agent_id=agent_id,
+                objective=request['objective'],
+                context=request.get('context'),
+                requested_output_tokens=output_tokens,
+                definition_version=definition.version,
+                definition_digest=definition_digest(definition),
+            )
+            model = ModelRequirement(**target.model_dump())
+            spec = WorkloadSpec(
+                job_type='AGENT_TASK',
+                model=model,
+                prompt='registered-agent-task:' + agent_id,
+                agent_task=payload,
+                max_output_tokens=output_tokens,
+                thinking=definition.thinking,
+                timeout_s=definition.timeout_s,
+                maximum_attempts=definition.retry_policy.maximum_attempts,
+                retry_base_s=definition.retry_policy.retry_base_s,
+                retry_max_s=definition.retry_policy.retry_max_s,
+            )
+        except Exception:
+            raise ControlError('invalid_agent_request') from None
+        key = request.get('idempotency_key')
+        if key is not None and (not isinstance(key, str) or not key.strip() or len(key) > 200):
+            raise ControlError('invalid_idempotency_key')
+        record = self._require_workload().submit(spec, idempotency_key=key)
+        return record.model_dump(mode='json')
+
+    def _agent_job(self, request):
+        self._only(request, {'job_id'})
+        store = self._require_workload()
+        try:
+            spec = store.spec(request['job_id'])
+        except KeyError:
+            raise ControlError('unknown_job', status=404) from None
+        if spec.job_type != 'AGENT_TASK':
+            raise ControlError('not_an_agent_job', status=404)
+        return store.get(request['job_id']).model_dump(mode='json')
+
+    def _agent_job_cancel(self, request):
+        self._only(request, {'job_id'})
+        store = self._require_workload()
+        try:
+            spec = store.spec(request['job_id'])
+        except KeyError:
+            raise ControlError('unknown_job', status=404) from None
+        if spec.job_type != 'AGENT_TASK':
+            raise ControlError('not_an_agent_job', status=404)
+        record = (self.orchestrator.cancel(request['job_id']) if self.orchestrator is not None
+                  else store.request_cancel(request['job_id']))
+        store.record_event(request['job_id'], 'agent.job.cancel_requested',
+            agent_id=spec.agent_task.agent_id, state=record.state.value)
+        return record.model_dump(mode='json')
+
+    def _agent_result(self, request):
+        self._only(request, {'job_id'})
+        store = self._require_workload()
+        try:
+            spec = store.spec(request['job_id'])
+        except KeyError:
+            raise ControlError('unknown_job', status=404) from None
+        if spec.job_type != 'AGENT_TASK':
+            raise ControlError('not_an_agent_job', status=404)
+        record = store.get(request['job_id'])
+        if record.result is None or not isinstance(record.result.get('structured_result'), dict):
+            raise ControlError('agent_result_unavailable', status=409)
+        return {'job_id': str(record.job_id), 'state': record.state.value,
+                'result': record.result['structured_result'],
+                'execution': {key: record.result.get(key) for key in
+                    ('model_id', 'provider_id', 'runtime', 'fallback', 'metadata')}}
 
 
 def encode_frame(value, *, maximum=MAX_REQUEST_BYTES):

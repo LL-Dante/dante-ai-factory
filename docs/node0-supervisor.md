@@ -36,6 +36,33 @@ and shares the normal JSONL audit path. Audit rotation retains the active file
 and one previous file, each bounded by the configured size. No prompts, model
 responses, credentials or environment values are written.
 
+## Registered local agents
+
+The operator control plane exposes a code-registered agent allowlist. The first
+entry is `dante-research`, which accepts an objective and optional context,
+uses only the currently qualified LOCAL_ONLY model, and stores a validated,
+bounded JSON report in the existing durable workload database. Agent jobs share
+the supervisor's single workload orchestrator and one-slot GPU gate. Job
+payloads retain the agent version and definition digest so an interrupted job
+cannot silently resume under changed instructions or model identity. Agent
+definitions are data; the control plane does not accept executable code, shell
+commands, web access, or model downloads.
+
+From the repository root, use the existing Node 0 named-pipe client:
+
+```powershell
+& .\.venv\Scripts\python.exe -m dante.node0_cli agent list
+& .\.venv\Scripts\python.exe -m dante.node0_cli agent describe dante-research
+& .\.venv\Scripts\python.exe -m dante.node0_cli agent submit dante-research `
+  --objective "Analyze the local AI Factory architecture" --output-tokens 256
+& .\.venv\Scripts\python.exe -m dante.node0_cli agent job <job_id>
+& .\.venv\Scripts\python.exe -m dante.node0_cli agent result <job_id>
+```
+
+Use `agent cancel <job_id>` to request cancellation. The result operation is
+available only after a successful job; job status and event history remain
+available through the same existing control plane and workload store.
+
 ## Start manually
 
 From the repository root in PowerShell:

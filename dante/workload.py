@@ -18,6 +18,8 @@ from uuid import uuid4
 from pydantic import Field, field_validator, model_validator
 
 from dante.contracts import StrictModel
+from dante.contracts.agents import AgentTaskPayload
+from dante.contracts.inference import ThinkingPolicy
 from dante.inference import InferenceCancelled, InferenceError, InferenceTimeout
 from dante.ledger import TaskLedger
 
@@ -98,11 +100,13 @@ class ModelRequirement(StrictModel):
 
 
 class WorkloadSpec(StrictModel):
-    job_type: str = Field(default='LOCAL_INFERENCE', pattern=r'^LOCAL_INFERENCE$')
+    job_type: str = Field(default='LOCAL_INFERENCE', pattern=r'^(LOCAL_INFERENCE|AGENT_TASK)$')
     model: ModelRequirement
     prompt: str = Field(min_length=1, max_length=20000)
+    agent_task: AgentTaskPayload | None = None
     temperature: float = Field(default=0, ge=0, le=2, allow_inf_nan=False)
     max_output_tokens: int = Field(default=128, ge=1, le=2048)
+    thinking: ThinkingPolicy = ThinkingPolicy.OFF
     priority: int = Field(default=0, ge=-100, le=100)
     timeout_s: float = Field(default=120, gt=0, le=3600, allow_inf_nan=False)
     deadline_at: datetime | None = None
@@ -122,6 +126,11 @@ class WorkloadSpec(StrictModel):
     def safe_metadata_and_retry(self):
         if self.retry_base_s > self.retry_max_s:
             raise ValueError('Retry base exceeds retry maximum')
+        if self.job_type == 'AGENT_TASK':
+            if self.agent_task is None or self.agent_task.requested_output_tokens not in (None, self.max_output_tokens):
+                raise ValueError('Agent task payload and output budget must agree')
+        elif self.agent_task is not None:
+            raise ValueError('Agent task payload requires AGENT_TASK job type')
         def check(value):
             if isinstance(value, dict):
                 for key, item in value.items():
@@ -244,6 +253,11 @@ class WorkloadStore:
                  spec.priority, _iso(created), created.timestamp(), _iso(created), created.timestamp(), deadline_epoch, 0))
             self._event(db, job_id, 'submitted', request_digest=canonical, job_type=spec.job_type,
                         priority=spec.priority, maximum_attempts=spec.maximum_attempts)
+            if spec.job_type == 'AGENT_TASK' and spec.agent_task is not None:
+                self._event(db, job_id, 'agent.job.submitted',
+                    agent_id=spec.agent_task.agent_id,
+                    agent_version=spec.agent_task.definition_version,
+                    output_tokens=spec.max_output_tokens, model_id=spec.model.model_id)
         return self.get(job_id)
 
     def spec(self, job_id: str) -> WorkloadSpec:
@@ -569,6 +583,7 @@ class ExecutionResult:
     fallback: bool
     runtime: str
     metadata: dict[str, Any]
+    structured_result: dict[str, Any] | None = None
 
 
 class ResourceGate:
@@ -618,6 +633,7 @@ class Node0InferenceExecutor:
             raise QualificationRejected('Requested model identity differs from configured qualified model')
         response = self.supervisor.infer(spec.prompt, model_reference=metadata.runtime_reference,
             context_tokens=metadata.context_tokens, max_output_tokens=spec.max_output_tokens,
+            thinking=spec.thinking,
             cancellation=cancellation)
         if cancellation.is_set():
             raise InferenceCancelled('Local inference cancelled')
@@ -707,6 +723,10 @@ class WorkloadOrchestrator:
             spec = self.store.spec(job_id)
             if spec.deadline_at and _now() >= spec.deadline_at:
                 self.store.fail(job_id, attempt_id, code='deadline_expired', retryable=False)
+                if spec.job_type == 'AGENT_TASK':
+                    self.store.record_event(job_id, 'agent.execution.failed', attempt_id=attempt_id,
+                        agent_id=spec.agent_task.agent_id, agent_version=spec.agent_task.definition_version,
+                        failure_code='deadline_expired', retryable=False)
                 self.resource_gate.release()
                 acquired = False
                 with self._active_lock:
@@ -720,7 +740,13 @@ class WorkloadOrchestrator:
                 model_digest=spec.model.digest_sha256)
             def execute_and_persist():
                 try:
-                    outcome = self.executor.execute(spec, active.cancellation)
+                    if spec.job_type == 'AGENT_TASK':
+                        execute_agent = getattr(self.executor, 'execute_agent', None)
+                        if execute_agent is None:
+                            raise QualificationRejected('Agent task execution is not configured')
+                        outcome = execute_agent(job, spec, active.cancellation)
+                    else:
+                        outcome = self.executor.execute(spec, active.cancellation)
                     if not isinstance(outcome.text, str) or len(outcome.text.encode('utf-8')) > MAX_RESULT_BYTES:
                         raise ValueError('result_too_large')
                     with active.finish_lock:
@@ -729,16 +755,34 @@ class WorkloadOrchestrator:
                         if active.cancellation.is_set() or self.store.is_cancel_requested(job_id, attempt_id):
                             self.store.request_cancel(job_id)
                             self.store.finish_cancel(job_id, attempt_id)
+                            if spec.job_type == 'AGENT_TASK':
+                                self.store.record_event(job_id, 'agent.execution.cancelled', attempt_id=attempt_id,
+                                    agent_id=spec.agent_task.agent_id,
+                                    agent_version=spec.agent_task.definition_version)
                             return
-                        self.store.succeed(job_id, attempt_id, {
+                        result = {
                             'text': outcome.text, 'model_id': outcome.model_id, 'provider_id': outcome.provider_id,
                             'runtime': outcome.runtime, 'fallback': outcome.fallback, 'metadata': outcome.metadata,
-                        })
+                        }
+                        structured = getattr(outcome, 'structured_result', None)
+                        if structured is not None:
+                            result['structured_result'] = structured
+                        succeeded = self.store.succeed(job_id, attempt_id, result)
+                        if spec.job_type == 'AGENT_TASK':
+                            event = ('agent.execution.completed' if succeeded.state == JobState.SUCCEEDED
+                                     else 'agent.execution.cancelled')
+                            self.store.record_event(job_id, event, attempt_id=attempt_id,
+                                agent_id=spec.agent_task.agent_id,
+                                agent_version=spec.agent_task.definition_version)
                 except InferenceCancelled:
                     with active.finish_lock:
                         if not active.timed_out:
                             self.store.request_cancel(job_id)
                             self.store.finish_cancel(job_id, attempt_id)
+                            if spec.job_type == 'AGENT_TASK':
+                                self.store.record_event(job_id, 'agent.execution.cancelled', attempt_id=attempt_id,
+                                    agent_id=spec.agent_task.agent_id,
+                                    agent_version=spec.agent_task.definition_version)
                 except BaseException as exc:
                     with active.finish_lock:
                         if active.timed_out:
@@ -748,7 +792,14 @@ class WorkloadOrchestrator:
                         code = 'result_too_large' if str(exc) == 'result_too_large' else (
                             type(exc).__name__ if isinstance(exc, (InferenceError, Node0Unavailable))
                             else 'local_execution_failed')
-                        self.store.fail(job_id, attempt_id, code=code, retryable=retryable)
+                        failure = self.store.fail(job_id, attempt_id, code=code, retryable=retryable)
+                        if spec.job_type == 'AGENT_TASK':
+                            event = ('agent.execution.cancelled' if failure.state == JobState.CANCELLED
+                                     else 'agent.execution.failed')
+                            self.store.record_event(job_id, event, attempt_id=attempt_id,
+                                agent_id=spec.agent_task.agent_id,
+                                agent_version=spec.agent_task.definition_version,
+                                failure_code=code, retryable=retryable)
 
             def reap_worker():
                 assert active.worker is not None
@@ -779,6 +830,11 @@ class WorkloadOrchestrator:
                         if active.worker.is_alive() and not active.timed_out:
                             active.timed_out = True
                             self.store.mark_timeout(job_id, attempt_id)
+                            if spec.job_type == 'AGENT_TASK':
+                                self.store.record_event(job_id, 'agent.execution.failed', attempt_id=attempt_id,
+                                    agent_id=spec.agent_task.agent_id,
+                                    agent_version=spec.agent_task.definition_version,
+                                    failure_code='attempt_timeout', retryable=True)
                             active.cancellation.set()
                     break
                 active.worker.join(min(0.025, remaining))

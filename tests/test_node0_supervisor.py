@@ -146,6 +146,36 @@ class SupervisorTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
+    def test_operator_composition_registers_agent_on_existing_local_executor(self):
+        from dante.agent_runner import AgentRunner, Node0WorkloadExecutor
+
+        supervisor, _ = build(self.root)
+
+        def idle_serve(orchestrator):
+            orchestrator.stop_event.wait(2)
+            orchestrator.stop()
+
+        with patch('dante.node0_control.Node0ControlServer') as server_type, \
+             patch('dante.workload.WorkloadOrchestrator.serve', idle_serve):
+            supervisor._start_operator_services()
+            try:
+                self.assertIsInstance(supervisor.orchestrator.executor, Node0WorkloadExecutor)
+                self.assertIsInstance(supervisor.agent_runner, AgentRunner)
+                self.assertIs(supervisor.orchestrator.executor.runner, supervisor.agent_runner)
+                self.assertIs(supervisor.agent_runner.registry, supervisor.agent_registry)
+                self.assertEqual([definition.agent_id for definition in supervisor.agent_registry.list()],
+                                 ['dante-research'])
+                service = server_type.call_args.args[0]
+                self.assertIs(service.agent_registry, supervisor.agent_registry)
+                self.assertIs(service.orchestrator, supervisor.orchestrator)
+            finally:
+                supervisor.orchestrator.request_stop()
+                supervisor._orchestrator_thread.join(2)
+                if supervisor.control_server is not None:
+                    supervisor.control_server.stop()
+                if supervisor.orchestrator._owner_released is False:
+                    supervisor.orchestrator.stop()
+
     def test_relative_persistence_paths_anchor_to_config_directory(self):
         config = self.root/'config'/'qualification-config.json'
         self.assertEqual(_absolute_from_config(Path('data')/'state.json', config),

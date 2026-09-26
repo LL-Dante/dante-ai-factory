@@ -255,6 +255,8 @@ class Node0Supervisor:
     control_server: object | None = None
     workload_store: object | None = None
     orchestrator: object | None = None
+    agent_registry: object | None = None
+    agent_runner: object | None = None
     _orchestrator_thread: threading.Thread | None = None
 
     def __post_init__(self):
@@ -564,13 +566,22 @@ class Node0Supervisor:
 
     def _start_operator_services(self) -> None:
         from dante.node0_control import Node0ControlServer, Node0ControlService
+        from dante.agent_runner import AgentRunner, Node0WorkloadExecutor, build_agent_registry
+        from dante.contracts.agents import AgentModelTarget
         from dante.workload import Node0InferenceExecutor, WorkloadOrchestrator, WorkloadStore
 
         path = self.config.workload_path or self.config.ledger_path.with_name('workloads.db')
         self.workload_store = WorkloadStore(path, audit=self.audit)
-        executor = Node0InferenceExecutor(self, expected_model_id=self.config.model.model_id,
+        inference_executor = Node0InferenceExecutor(self, expected_model_id=self.config.model.model_id,
             expected_runtime_reference=self.config.qualification.model_reference,
             expected_digest=self.config.qualification.model_digest)
+        target = AgentModelTarget(model_id=self.config.model.model_id,
+            runtime_reference=self.config.qualification.model_reference,
+            digest_sha256=self.config.qualification.model_digest,
+            context_tokens=self.config.qualification.context_tokens)
+        self.agent_registry = build_agent_registry(target)
+        self.agent_runner = AgentRunner(self.agent_registry, inference_executor, self.workload_store)
+        executor = Node0WorkloadExecutor(inference_executor, self.agent_runner)
         self.orchestrator = WorkloadOrchestrator(self.workload_store, executor, max_gpu_jobs=1,
             worker_id='node0-' + str(self.config.node_uuid))
         self.orchestrator.start()
@@ -578,7 +589,8 @@ class Node0Supervisor:
             name='dante-node0-workload-orchestrator', daemon=True)
         self._orchestrator_thread.start()
         self.control_server = Node0ControlServer(Node0ControlService(self,
-            workload_store=self.workload_store, orchestrator=self.orchestrator))
+            workload_store=self.workload_store, orchestrator=self.orchestrator,
+            agent_registry=self.agent_registry))
         try:
             self.control_server.start()
         except Exception:
@@ -586,6 +598,8 @@ class Node0Supervisor:
             self._orchestrator_thread.join(timeout=2)
             self.control_server = None
             self.orchestrator = None
+            self.agent_registry = None
+            self.agent_runner = None
             self._orchestrator_thread = None
             self.workload_store = None
             raise

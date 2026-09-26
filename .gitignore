@@ -45,3 +45,13 @@ node_modules/
 *.bak
 .DS_Store
 Thumbs.db
+
+# --- local machine / runtime only (never commit) ---
+# monitoring source, config, dashboard, scripts and tests stay tracked.
+# Only monitoring runtime output and state are excluded.
+monitoring/logs/
+monitoring/state/
+migration-backup/
+opencode.json
+Modelfile.agent
+agent-test.txt

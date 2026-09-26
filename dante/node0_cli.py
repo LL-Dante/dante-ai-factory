@@ -37,6 +37,24 @@ def _workload_parser(sub):
     return workload
 
 
+def _agent_parser(sub):
+    agent = sub.add_parser('agent', help='Run registered local-only agents')
+    actions = agent.add_subparsers(dest='agent_action', required=True)
+    actions.add_parser('list')
+    describe = actions.add_parser('describe')
+    describe.add_argument('agent_id')
+    submit = actions.add_parser('submit')
+    submit.add_argument('agent_id')
+    submit.add_argument('--objective', required=True)
+    submit.add_argument('--context')
+    submit.add_argument('--output-tokens', type=int)
+    submit.add_argument('--idempotency-key')
+    for name in ('job', 'result', 'cancel'):
+        command = actions.add_parser(name)
+        command.add_argument('job_id')
+    return agent
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -48,6 +66,7 @@ def main(argv=None) -> int:
     infer.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
     infer.add_argument("--thinking", choices=("off", "on"), default="off")
     _workload_parser(sub)
+    _agent_parser(sub)
     args = parser.parse_args(argv)
     try:
         client = Node0ControlClient()
@@ -60,7 +79,8 @@ def main(argv=None) -> int:
                                      "max_output_tokens": args.max_output_tokens,
                                      "thinking": args.thinking})
         else:
-            result = _workload_request(client, args)
+            result = (_workload_request(client, args) if args.command == 'workload'
+                      else _agent_request(client, args))
         _print(result)
         return 0
     except ControlError as exc:
@@ -102,6 +122,27 @@ def _workload_request(client, args):
     operation = {"status": "workload_status", "result": "workload_result",
                  "cancel": "workload_cancel", "events": "workload_events"}[action]
     return client.request({"op": operation, "job_id": args.job_id})
+
+
+def _agent_request(client, args):
+    action = args.agent_action
+    if action == 'list':
+        return client.request({'op': 'agent_list'})
+    if action == 'describe':
+        return client.request({'op': 'agent_describe', 'agent_id': args.agent_id})
+    if action == 'submit':
+        request = {'op': 'agent_submit', 'agent_id': args.agent_id,
+                   'objective': args.objective}
+        if args.context is not None:
+            request['context'] = args.context
+        if args.output_tokens is not None:
+            request['requested_output_tokens'] = args.output_tokens
+        if args.idempotency_key is not None:
+            request['idempotency_key'] = args.idempotency_key
+        return client.request(request)
+    operation = {'job': 'agent_job', 'cancel': 'agent_job_cancel',
+                 'result': 'agent_result'}[action]
+    return client.request({'op': operation, 'job_id': args.job_id})
 
 
 if __name__ == "__main__":

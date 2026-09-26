@@ -688,14 +688,19 @@ class DanteBenchmarkAgent:
 
     def _hardware_digest_for(self, inference, production_endpoint: str) -> str | None:
         """A real snapshot digest, or None. Absence is never replaced by a placeholder."""
-        if self._collector is None:
-            return None
+        collector = self._collector
+        if collector is None:
+            stores: tuple = ()
+            try:
+                store = inference.supervisor.config.qualification.model_store
+                stores = (Path(store),) if store else ()
+            except (AttributeError, TypeError):
+                stores = ()
+            collector = lambda: collect_snapshot(
+                runtime_endpoints=(production_endpoint, self._benchmark_endpoint),
+                qualified_endpoint=production_endpoint, model_stores=stores)
         try:
-            snapshot = self._collector()
-        except Exception:
-            return None
-        try:
-            return hardware_snapshot_digest(snapshot)
+            return hardware_snapshot_digest(collector())
         except Exception:
             return None
 

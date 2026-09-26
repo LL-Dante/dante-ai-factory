@@ -27,6 +27,7 @@ from dante.contracts.benchmarks import (BenchmarkComparison, BenchmarkIsolation,
                                         VramBudget, text_digest)
 from dante.contracts.hardware import Fact
 from dante.control_center import benchmark_overview, render_benchmark_text
+from dante.model_scout import hardware_snapshot_digest
 from dante.nvidia_probe import CommandOutput
 from dante.workload import ModelRequirement, QualificationRejected, WorkloadSpec
 
@@ -775,6 +776,40 @@ class BenchmarkAgentTests(unittest.TestCase):
             self.assertEqual(item.digest, text_digest(item.text))
             self.assertEqual(item.characters, len(item.text))
         self.assertEqual(benchmark_prompts(), prompts)
+
+    def test_samples_are_bound_to_a_hardware_snapshot_when_one_is_available(self):
+        # A stand-in for the snapshot: the digest function itself is covered by the
+        # Stage B1 tests, so what matters here is that the digest reaches every sample.
+        class _Snapshot:
+            def model_dump(self, **_keywords):
+                return {'system': {'os': 'windows'}, 'coverage': {'sensors': 1}}
+
+        expected = hardware_snapshot_digest(_Snapshot())
+        production = production_runtime()
+        runtime = benchmark_runtime(tags=[tag(SMALL, SMALL_DIGEST, 2497293931)],
+                                    shown={SMALL: show()})
+        agent = DanteBenchmarkAgent(models=(SMALL,), collector=_Snapshot,
+            runtime_factory=lambda endpoint: production if endpoint == PRODUCTION else runtime)
+        result = agent.execute(_inference(PRODUCTION), _job(), self.definition,
+                               _payload(self.definition), _spec(self.definition),
+                               threading.Event(), lambda *_a, **_k: None)
+        benchmark = result.structured_result['benchmark']
+        self.assertEqual(benchmark['hardware_snapshot_digest'], expected)
+        for sample in benchmark['runs'][0]['samples']:
+            self.assertEqual(sample['hardware_snapshot_digest'], expected)
+
+    def test_an_unavailable_snapshot_is_recorded_as_absent(self):
+        def explode():
+            raise OSError('probe refused')
+        production = production_runtime()
+        runtime = benchmark_runtime(tags=[tag(SMALL, SMALL_DIGEST, 2497293931)],
+                                    shown={SMALL: show()})
+        agent = DanteBenchmarkAgent(models=(SMALL,), collector=explode,
+            runtime_factory=lambda endpoint: production if endpoint == PRODUCTION else runtime)
+        result = agent.execute(_inference(PRODUCTION), _job(), self.definition,
+                               _payload(self.definition), _spec(self.definition),
+                               threading.Event(), lambda *_a, **_k: None)
+        self.assertIsNone(result.structured_result['benchmark']['hardware_snapshot_digest'])
 
     def test_registry_registers_the_benchmark_agent(self):
         registry = build_agent_registry(self.TARGET)

@@ -35,12 +35,17 @@ class AgentRetryPolicy(StrictModel):
         return self
 
 
+AgentCapability = Literal['LOCAL_INFERENCE', 'READ_ONLY_INVENTORY']
+READ_ONLY_CAPABILITIES = ('READ_ONLY_INVENTORY',)
+
+
 class AgentDefinition(StrictModel):
     agent_id: str = Field(pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$', max_length=64)
     name: str = Field(min_length=1, max_length=120)
     role: str = Field(min_length=1, max_length=500)
     instructions: str = Field(min_length=1, max_length=4000)
-    capabilities: tuple[Literal['LOCAL_INFERENCE'], ...] = Field(default=('LOCAL_INFERENCE',), min_length=1, max_length=1)
+    capabilities: tuple[AgentCapability, ...] = Field(
+        default=('LOCAL_INFERENCE',), min_length=1, max_length=1)
     model_target: AgentModelTarget
     thinking: ThinkingPolicy = ThinkingPolicy.OFF
     output_token_budget: int = Field(default=384, ge=64, le=512)
@@ -51,8 +56,8 @@ class AgentDefinition(StrictModel):
 
     @model_validator(mode='after')
     def local_inference_only(self):
-        if self.capabilities != ('LOCAL_INFERENCE',):
-            raise ValueError('Only LOCAL_INFERENCE is currently supported')
+        if self.capabilities not in (('LOCAL_INFERENCE',), READ_ONLY_CAPABILITIES):
+            raise ValueError('An agent declares exactly one supported capability')
         return self
 
 

@@ -5,13 +5,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+from pathlib import Path
 import re
 import threading
 from typing import Any, Protocol
 
-from dante.contracts.agents import AgentDefinition, AgentModelTarget, AgentResult, AgentTaskPayload, ResearchDraft
+from dante.contracts.agents import (READ_ONLY_CAPABILITIES, AgentDefinition, AgentModelTarget,
+                                    AgentResult, AgentTaskPayload, ResearchDraft)
+from dante.contracts.hardware import HardwareCapabilityProfile, HardwareSnapshot
 from dante.contracts.inference import ThinkingPolicy
+from dante.hardware_inventory import capability_profile, collect_snapshot
 from dante.inference import InferenceCancelled
+from dante.local_runtime import OllamaAdapter
 from dante.workload import (ExecutionResult, JobRecord, Node0InferenceExecutor,
                             QualificationRejected, WorkloadSpec)
 
@@ -260,6 +265,132 @@ class DanteResearchAgent:
         )
 
 
+READ_ONLY_CAPABILITY = READ_ONLY_CAPABILITIES[0]
+
+
+class DanteHardwareAgent:
+    """Read-only local hardware and runtime inventory. Performs no inference.
+
+    Stage A scope: measure and normalize what the node can prove about itself. This
+    agent never mutates hardware, runtimes, services, tasks, model stores,
+    qualification or configuration, and it never calls the model. Suitability
+    verdicts are deliberately withheld until a model is actually selected.
+    """
+
+    AGENT_ID = 'dante-hardware'
+    READ_ONLY = True
+
+    def __init__(self, *, endpoints=None, model_stores=None, collector=None):
+        self._endpoints = endpoints
+        self._model_stores = model_stores
+        self._collector = collector or collect_snapshot
+
+    @classmethod
+    def definition(cls, model_target: AgentModelTarget) -> AgentDefinition:
+        return AgentDefinition(
+            agent_id=cls.AGENT_ID,
+            name='Dante Hardware Agent',
+            role='Read-only hardware and local runtime inventory',
+            instructions=(
+                'Collect measured hardware and local runtime facts only. '
+                'Report unavailable sensors as unknown rather than estimating them. '
+                'Do not recommend, rank or download models, and do not change any setting.'
+            ),
+            capabilities=('READ_ONLY_INVENTORY',),
+            model_target=model_target,
+            thinking=ThinkingPolicy.OFF,
+            output_token_budget=64,
+            timeout_s=120,
+            version='1.0.0',
+        )
+
+    def execute(self, inference: Node0InferenceExecutor, job: JobRecord,
+                definition: AgentDefinition, payload: AgentTaskPayload, spec: WorkloadSpec,
+                cancellation: threading.Event, emit) -> ExecutionResult:
+        if cancellation.is_set():
+            raise InferenceCancelled('Hardware inventory cancelled')
+        started = datetime.now(timezone.utc)
+        endpoints, qualified, stores = self._targets(inference)
+        emit('agent.hardware.collecting', runtime_endpoints=len(endpoints), model_stores=len(stores))
+        snapshot = self._collector(runtime_endpoints=endpoints, qualified_endpoint=qualified,
+                                   model_stores=stores)
+        if cancellation.is_set():
+            raise InferenceCancelled('Hardware inventory cancelled')
+        profile = capability_profile(snapshot)
+        measured, derived, unknown = snapshot.fact_count()
+        emit('agent.hardware.collected', probe_version=snapshot.probe_version,
+             measured_facts=measured, derived_facts=derived, unknown_facts=unknown,
+             gpus=len(snapshot.gpus), runtimes=len(snapshot.runtimes),
+             monitoring_source=snapshot.coverage.monitoring_source)
+        completed = datetime.now(timezone.utc)
+        structured = {
+            'snapshot': snapshot.model_dump(mode='json'),
+            'capability_profile': profile.model_dump(mode='json'),
+            'read_only': True,
+            'inference_performed': False,
+            'observed_at': snapshot.observed_at.isoformat(),
+            'started_at': started.isoformat(),
+            'completed_at': completed.isoformat(),
+        }
+        return ExecutionResult(
+            text=self._summary(snapshot, profile),
+            model_id=definition.model_target.model_id,
+            provider_id='ollama',
+            fallback=False,
+            runtime='ollama',
+            metadata={
+                'agent_id': definition.agent_id,
+                'agent_version': definition.version,
+                'probe_version': snapshot.probe_version,
+                'read_only': True,
+                'inference_performed': False,
+                'inference_calls': 0,
+                'model_identity_source': 'job_binding',
+                'measured_facts': measured,
+                'derived_facts': derived,
+                'unknown_facts': unknown,
+                'unknown_paths': list(snapshot.unknown_facts())[:32],
+                'gpus': len(snapshot.gpus),
+                'runtimes': len(snapshot.runtimes),
+                'runtime_endpoints': [item.endpoint for item in snapshot.runtimes],
+                'capability_facts': len(profile.facts),
+                'recommendations_withheld': True,
+            },
+            structured_result=structured,
+        )
+
+    def _targets(self, inference) -> tuple[tuple[str, ...], str | None, tuple[Path, ...]]:
+        """Runtime endpoints and model stores to observe, from explicit wiring only."""
+        endpoints = self._endpoints
+        stores = self._model_stores
+        qualified = None
+        if endpoints is None or stores is None:
+            try:
+                qualification = inference.supervisor.config.qualification
+                qualified = qualification.profile.base_url
+                if endpoints is None:
+                    endpoints = (qualified, OllamaAdapter.default_url)
+                if stores is None and qualification.model_store is not None:
+                    stores = (Path(qualification.model_store),)
+            except AttributeError:
+                pass
+        return (tuple(dict.fromkeys(endpoints or ())),
+                qualified,
+                tuple(stores or ()))
+
+    @staticmethod
+    def _summary(snapshot: HardwareSnapshot, profile: HardwareCapabilityProfile) -> str:
+        measured, derived, unknown = snapshot.fact_count()
+        parts = [f'probe={snapshot.probe_version}', f'read_only={str(snapshot.read_only).lower()}',
+                 f'measured={measured}', f'derived={derived}', f'unknown={unknown}',
+                 f'gpus={len(snapshot.gpus)}', f'runtimes={len(snapshot.runtimes)}',
+                 f'capability_facts={len(profile.facts)}',
+                 'recommendations_withheld=true']
+        if snapshot.unknown_facts():
+            parts.append('unknown_paths=' + ','.join(snapshot.unknown_facts()[:8]))
+        return ' '.join(parts)
+
+
 class AgentRunner:
     def __init__(self, registry: AgentRegistry, inference: Node0InferenceExecutor, store):
         self.registry, self.inference, self.store = registry, inference, store
@@ -282,6 +413,9 @@ class AgentRunner:
                 or spec.max_output_tokens > definition.output_token_budget
                 or spec.thinking != definition.thinking):
             raise QualificationRejected('Agent job does not match its registered model and execution policy')
+        if READ_ONLY_CAPABILITY in definition.capabilities and not getattr(
+                registration.implementation, 'READ_ONLY', False):
+            raise AgentUnavailable('Read-only agent requires a read-only implementation')
 
         def emit(event, **metadata):
             safe = {'agent_id': definition.agent_id, 'agent_version': definition.version, **metadata}
@@ -313,10 +447,13 @@ def build_agent_registry(model_target: AgentModelTarget) -> AgentRegistry:
     registry = AgentRegistry()
     implementation = DanteResearchAgent()
     registry.register(implementation.definition(model_target), implementation)
+    hardware = DanteHardwareAgent()
+    registry.register(hardware.definition(model_target), hardware)
     return registry
 
 
 __all__ = [
     'AgentOutputInvalid', 'AgentRegistry', 'AgentRunner', 'AgentUnavailable',
-    'DanteResearchAgent', 'Node0WorkloadExecutor', 'build_agent_registry', 'definition_digest',
+    'DanteHardwareAgent', 'DanteResearchAgent', 'Node0WorkloadExecutor', 'build_agent_registry',
+    'definition_digest',
 ]

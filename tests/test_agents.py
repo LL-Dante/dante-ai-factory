@@ -114,7 +114,8 @@ class AgentContractTests(AgentFixture):
             AgentDefinition(**{**self.definition.model_dump(), 'shell_command': 'whoami'})
 
     def test_registry_lists_describes_and_rejects_unknown_or_duplicate_agents(self):
-        self.assertEqual([item.agent_id for item in self.registry.list()], ['dante-research'])
+        self.assertEqual([item.agent_id for item in self.registry.list()],
+                         ['dante-hardware', 'dante-research'])
         self.assertEqual(self.registry.describe('dante-research').version, '1.0.0')
         with self.assertRaises(AgentUnavailable):
             self.registry.require('not-registered')
@@ -616,7 +617,8 @@ class AgentControlPlaneTests(AgentFixture):
 
     def test_control_plane_lists_describes_and_rejects_unknown_agent(self):
         listed = self.service.dispatch({'op': 'agent_list'})['result']
-        self.assertEqual([item['agent_id'] for item in listed], ['dante-research'])
+        self.assertEqual([item['agent_id'] for item in listed],
+                         ['dante-hardware', 'dante-research'])
         described = self.service.dispatch({'op': 'agent_describe', 'agent_id': 'dante-research'})['result']
         self.assertEqual(described['capabilities'], ['LOCAL_INFERENCE'])
         with self.assertRaisesRegex(ControlError, 'unknown_agent'):
@@ -674,7 +676,8 @@ class AgentControlPlaneTests(AgentFixture):
         try:
             server.start()
             listed = client.request({'op': 'agent_list'})
-            self.assertEqual([agent['agent_id'] for agent in listed], ['dante-research'])
+            self.assertEqual([agent['agent_id'] for agent in listed],
+                             ['dante-hardware', 'dante-research'])
             submitted = client.request({'op': 'agent_submit', 'agent_id': 'dante-research',
                 'objective': 'Round-trip through the local pipe.'})
             self.assertEqual(submitted['state'], 'queued')

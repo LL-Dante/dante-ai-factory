@@ -267,6 +267,16 @@ class OllamaAdapter(LocalRuntimeAdapter):
         except (KeyError, TypeError, ValueError, AttributeError):
             raise InvalidResponse('Invalid Ollama model inventory') from None
 
+    def loaded(self):
+        """Read-only resident-model view. Never loads, unloads or runs anything."""
+        try:
+            models = self._json('/api/ps')['models']
+            if not isinstance(models, list) or any(not isinstance(item.get('name'), str) for item in models):
+                raise ValueError('Expected loaded models list')
+            return [dict(item, id=item['name']) for item in models]
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise InvalidResponse('Invalid Ollama loaded model inventory') from None
+
     def complete(self, request: InferenceRequest) -> InferenceResponse:
         return self._complete(request)
 

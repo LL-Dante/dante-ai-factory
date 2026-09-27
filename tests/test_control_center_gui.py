@@ -98,6 +98,8 @@ class ControlCenterGuiPresentationTests(unittest.TestCase):
         tests = inspector_payload('tests', 'job-A', {}, events)
         facts = dict(tests['fields'])
         self.assertEqual(facts['Test run 1 project root'], 'workspace/project')
+        self.assertIn('Unknown', facts['Test run 1 started'])
+        self.assertEqual(facts['Test run 1 completed'], 't1')
         self.assertEqual(facts['Test run 1 failed cases'], ['test_expected'])
         self.assertIn('raw output not persisted', facts['Test run 1 output'])
 

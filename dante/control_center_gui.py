@@ -379,6 +379,24 @@ def development_job_metrics(events):
     }
 
 
+def development_test_status(events):
+    """Report bounded test-runner events without claiming OS isolation."""
+    runs = [event for event in events if isinstance(event, dict)
+            and event.get("event") == "tool.completed"
+            and (event.get("metadata") or {}).get("tool_id") == "RUN_TESTS"]
+    if not runs:
+        return "NOT RUN · bounded RUN_TESTS available"
+    metadata = runs[-1].get("metadata") or {}
+    if metadata.get("status") != "success":
+        return f"RUN_TESTS execution {metadata.get('status', 'unknown')}"
+    passed = metadata.get("tests_passed")
+    if passed is True:
+        return "PASS"
+    if passed is False:
+        return "FAIL · test executed"
+    return "RUN_TESTS executed · outcome not reported"
+
+
 class ControlCenterApp:
     POLL_SECONDS = 3
 
@@ -586,7 +604,7 @@ class ControlCenterApp:
         form = ttk.Frame(self.page, style="Panel.TFrame", padding=14)
         form.pack(fill="x", pady=10)
         ttk.Label(form, text="Model", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(form, text="LOCAL · dante-qwen-agent:latest · tests NOT RUN / BLOCKED", style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=10)
+        ttk.Label(form, text="LOCAL · dante-qwen-agent:latest · bounded RUN_TESTS available", style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=10)
         ttk.Label(form, text="Objective", style="Muted.TLabel").grid(row=1, column=0, sticky="nw", pady=10)
         objective = tk.Text(form, height=5, bg="#11151d", fg="#e6eaf0", insertbackground="white", relief="flat", wrap="word")
         objective.grid(row=1, column=1, sticky="ew", padx=10, pady=10)
@@ -603,7 +621,7 @@ class ControlCenterApp:
         output = tk.Text(self.page, bg="#171d27", fg="#e6eaf0", relief="flat", wrap="word", state="disabled")
         output.pack(fill="both", expand=True)
         self._chat_output = output
-        ttk.Label(self.page, text="Workspace: artifacts/worker-sandbox · approved tools only · no shell · tests NOT RUN / BLOCKED (no OS sandbox or RUN_TESTS tool)", style="Muted.TLabel").pack(anchor="w", pady=8)
+        ttk.Label(self.page, text="Workspace: artifacts/worker-sandbox · approved tools only · no shell · bounded RUN_TESTS · current-user permissions · not an OS sandbox", style="Muted.TLabel").pack(anchor="w", pady=8)
         active = bool(self._active_dev_job_id or getattr(self, "_dev_submit_pending", False))
         submit_button.configure(state="disabled" if active else "normal")
         cancel_button.configure(state="normal" if self._active_dev_job_id else "disabled")
@@ -652,7 +670,7 @@ class ControlCenterApp:
         self._chat_submit_button.configure(state="disabled")
         self._chat_cancel_button.configure(state="disabled")
         self._active_dev_started = time.monotonic()
-        self._render_dev_job("SUBMITTING · LOCAL 11434 · one job at a time\nTests: NOT RUN / BLOCKED")
+        self._render_dev_job("SUBMITTING · LOCAL 11434 · one job at a time\nTESTS: NOT RUN YET · bounded RUN_TESTS available")
         threading.Thread(target=self._submit_dev_job_background, args=(text,), daemon=True).start()
 
     def _submit_dev_job_background(self, objective):
@@ -668,7 +686,7 @@ class ControlCenterApp:
         self._dev_submit_pending = False
         self._active_dev_job_id = str(job.job_id)
         self._set_dev_chat_buttons(submit="disabled", cancel="normal")
-        self._render_dev_job(f"JOB: {job.job_id}\nSTATE: {job.state.value}\nQUEUE POSITION: {self._unknown()}\nTESTS: NOT RUN / BLOCKED")
+        self._render_dev_job(f"JOB: {job.job_id}\nSTATE: {job.state.value}\nQUEUE POSITION: {self._unknown()}\nTESTS: NOT RUN YET · bounded RUN_TESTS available")
         self._schedule_dev_poll(0)
 
     def _dev_submit_failed(self, message):
@@ -715,7 +733,7 @@ class ControlCenterApp:
                      f"OUTPUT TOKENS (SUM ACROSS CALLS): {metrics['output_tokens']}",
                      "MODEL: dante-qwen-agent:latest · http://127.0.0.1:11434",
                      "TTFT / cached tokens / output tokens per second: Unknown (not reported)",
-                     "TESTS: NOT RUN / BLOCKED (no OS sandbox or RUN_TESTS tool)", "", "TIMELINE"]
+                     f"TESTS: {development_test_status(events)}", "", "TIMELINE"]
             for event in events[-40:]:
                 name = event.get("event", self._unknown())
                 metadata = event.get("metadata") or {}
@@ -753,7 +771,7 @@ class ControlCenterApp:
         if not job_id:
             return
         self._set_dev_chat_buttons(submit="disabled", cancel="disabled")
-        self._render_dev_job(f"JOB: {job_id}\nCANCEL REQUESTED\nTests: NOT RUN / BLOCKED")
+        self._render_dev_job(f"JOB: {job_id}\nCANCEL REQUESTED\nTESTS: current state remains in event timeline")
         def cancel_background():
             try:
                 job = self._get_dev_worker().cancel(job_id)

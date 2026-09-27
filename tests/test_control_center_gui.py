@@ -7,6 +7,7 @@ from dante.control_center_gui import (
     build_ollama_status,
     display_fact,
     development_job_metrics,
+    development_test_status,
     format_bytes,
     format_count,
     elapsed_wall,
@@ -25,6 +26,15 @@ from dante.control_center_gui import (
 
 
 class ControlCenterGuiPresentationTests(unittest.TestCase):
+    def test_development_test_status_distinguishes_available_execution_and_result(self):
+        self.assertEqual(development_test_status([]), "NOT RUN · bounded RUN_TESTS available")
+        base = {"event": "tool.completed", "metadata": {"tool_id": "RUN_TESTS", "status": "success"}}
+        self.assertEqual(development_test_status([base]), "RUN_TESTS executed · outcome not reported")
+        passed = {**base, "metadata": {**base["metadata"], "tests_passed": True}}
+        failed = {**base, "metadata": {**base["metadata"], "tests_passed": False}}
+        self.assertEqual(development_test_status([passed]), "PASS")
+        self.assertEqual(development_test_status([failed]), "FAIL · test executed")
+
     def test_development_worker_metrics_use_reported_event_values(self):
         facts = development_job_metrics([
             {"event": "model.completed", "metadata": {"input_tokens": 5, "output_tokens": 2}},

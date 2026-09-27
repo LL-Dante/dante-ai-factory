@@ -7,6 +7,8 @@ from dante.control_center_gui import (
     build_ollama_status,
     display_fact,
     development_job_metrics,
+    development_job_state_label,
+    development_queue_lines,
     development_test_status,
     format_bytes,
     format_count,
@@ -34,6 +36,22 @@ class ControlCenterGuiPresentationTests(unittest.TestCase):
         failed = {**base, "metadata": {**base["metadata"], "tests_passed": False}}
         self.assertEqual(development_test_status([passed]), "PASS")
         self.assertEqual(development_test_status([failed]), "FAIL · test executed")
+
+    def test_queue_presentation_shows_wait_owner_and_unknown_release(self):
+        telemetry = {
+            'capacity': 1, 'queue_depth': 1, 'position': 1, 'priority': 4,
+            'queued_at': '2026-09-27T14:00:00+00:00', 'slot_acquired_at': None,
+            'slot_released_at': None, 'slot_released_reason': 'no durable release event is recorded',
+            'queue_wait_ms': 125, 'slot_owner_job_id': 'job-owner',
+            'slot_owner_worker_id': 'worker-1', 'unknown_reasons': {},
+        }
+        self.assertEqual(development_job_state_label('queued', telemetry, 'job-waiter'),
+                         'QUEUED · WAITING FOR LOCAL MODEL SLOT')
+        lines = development_queue_lines(telemetry, 'job-waiter', 'queued')
+        self.assertIn('QUEUE DEPTH: 1 · POSITION: 1 · CAPACITY: 1', lines)
+        self.assertIn('LOCAL MODEL SLOT OWNER: job-owner · worker-1', lines)
+        self.assertIn('CURRENT QUEUE WAIT: 125 ms', lines)
+        self.assertIn('SLOT RELEASED AT: Unknown (no durable release event is recorded)', lines)
 
     def test_development_worker_metrics_use_reported_event_values(self):
         facts = development_job_metrics([

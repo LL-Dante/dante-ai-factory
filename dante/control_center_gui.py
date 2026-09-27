@@ -358,6 +358,44 @@ def job_details_text(job, events=()):
     return "\n".join(lines)
 
 
+def development_job_state_label(state, telemetry, job_id):
+    if (state == 'queued' and isinstance(telemetry, dict)
+            and telemetry.get('slot_owner_job_id')
+            and telemetry.get('slot_owner_job_id') != job_id):
+        return 'QUEUED · WAITING FOR LOCAL MODEL SLOT'
+    return str(state).upper()
+
+
+def development_queue_lines(telemetry, job_id, state):
+    telemetry = telemetry if isinstance(telemetry, dict) else {}
+    unknown = telemetry.get('unknown_reasons') or {}
+
+    def value(key):
+        item = telemetry.get(key)
+        if item is None or item == '':
+            return f"Unknown ({unknown.get(key, 'not reported')})"
+        return str(item)
+
+    position = value('position') if state == 'queued' else 'not queued'
+    owner = telemetry.get('slot_owner_job_id')
+    if owner:
+        worker = telemetry.get('slot_owner_worker_id')
+        owner_text = str(owner) + (f' · {worker}' if worker else '')
+    else:
+        owner_text = f"Unknown ({unknown.get('slot_owner', 'not reported')})"
+    wait = telemetry.get('queue_wait_ms')
+    wait_text = f'{wait} ms' if isinstance(wait, int) and not isinstance(wait, bool) else value('queue_wait_ms')
+    released = telemetry.get('slot_released_at')
+    release_text = str(released) if released else f"Unknown ({telemetry.get('slot_released_reason', 'not reported')})"
+    return [
+        f"QUEUE DEPTH: {value('queue_depth')} · POSITION: {position} · CAPACITY: {value('capacity')}",
+        f"PRIORITY: {value('priority')}", f"QUEUED AT: {value('queued_at')}",
+        f"LOCAL MODEL SLOT OWNER: {owner_text}",
+        f"SLOT ACQUIRED AT: {value('slot_acquired_at')}", f"{'CURRENT ' if state == 'queued' else ''}QUEUE WAIT: {wait_text}",
+        f"SLOT RELEASED AT: {release_text}",
+    ]
+
+
 def development_job_metrics(events):
     """Summarize only measured development-worker event fields."""
     rows = [event for event in events if isinstance(event, dict)]
@@ -721,11 +759,12 @@ class ControlCenterApp:
             worker = self._get_dev_worker()
             job = worker.get(job_id)
             events = worker.events(job_id)
-            position = worker.queue_position(job_id)
+            telemetry = worker.queue_telemetry(job_id)
             elapsed = time.monotonic() - self._active_dev_started if self._active_dev_started else None
             metrics = development_job_metrics(events)
-            lines = [f"JOB: {job_id}", f"STATE: {job.state.value.upper()}",
-                     f"QUEUE POSITION: {position if position is not None else self._unknown()}",
+            state_label = development_job_state_label(job.state.value, telemetry, job_id)
+            lines = [f"JOB: {job_id}", f"STATE: {state_label}",
+                     *development_queue_lines(telemetry, job_id, job.state.value),
                      f"ELAPSED: {elapsed:.1f}s" if elapsed is not None else f"ELAPSED: {self._unknown()}",
                      f"CURRENT OPERATION: {metrics['current_operation']}",
                      f"MODEL CALLS: {metrics['model_calls']} · TOOL CALLS: {metrics['tool_calls']}",

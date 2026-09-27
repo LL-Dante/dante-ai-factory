@@ -92,6 +92,18 @@ class DevelopmentAgentLoopTests(unittest.TestCase):
         self.assertEqual(loop.run('bounded', Event()).status, 'LIMIT_REACHED')
         self.assertEqual(len(adapter.requests), 1)
 
+    def test_default_budget_allows_final_after_six_tool_steps(self):
+        replies = []
+        for index in range(6):
+            call = ToolCall(call_id=f'c{index}', name='READ_FILE', arguments={'path': 'a.txt'})
+            replies.append(response(calls=(call,)))
+        replies.append(response('all checks passed'))
+        adapter = FakeAdapter(replies)
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model, ('READ_FILE',))
+        result = loop.run('inspect, execute and finalize', Event())
+        self.assertEqual((result.status, result.summary), ('DONE', 'all checks passed'))
+        self.assertEqual((result.model_calls, result.tool_calls), (7, 6))
+
     def test_deadline_cancels_inflight_request(self):
         adapter = FakeAdapter([response('late')], delay=0.03)
         loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model, ('READ_FILE',), max_wall_s=0.01)

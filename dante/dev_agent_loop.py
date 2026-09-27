@@ -43,7 +43,7 @@ class DevelopmentAgentLoop:
 
     def __init__(self, adapter, broker: ToolBroker, task: Task, model: ModelRef,
                  tool_ids: tuple[str, ...], emit: Callable[..., None] | None = None, *,
-                 max_steps: int = 6, max_tool_calls: int = 8,
+                 max_steps: int = 8, max_tool_calls: int = 8,
                  max_wall_s: float = 600, max_output_tokens: int = 384):
         if not 1 <= max_steps <= 8 or not 1 <= max_tool_calls <= 12:
             raise ValueError('Step or tool-call limit outside safe bounds')

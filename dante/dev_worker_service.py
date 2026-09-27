@@ -78,7 +78,7 @@ class _CodingAgent:
             objective += '\n\nContext:\n' + payload.context
         try:
             result = DevelopmentAgentLoop(self.adapter, self.broker, task, self.model,
-                self.tool_ids, emit=emit, max_steps=6, max_tool_calls=8,
+                self.tool_ids, emit=emit, max_steps=8, max_tool_calls=8,
                 max_wall_s=600, max_output_tokens=384).run(objective, cancellation)
             if result.status == 'CANCELLED':
                 self.ledger.transition(task.task_id, TaskStatus.CANCELLED)

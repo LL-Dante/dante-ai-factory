@@ -29,8 +29,19 @@ class DevelopmentTestToolTests(unittest.TestCase):
         result = self.broker._run(self.task, 'RUN_TESTS', {'target': 'tests/test_math.py'})
         self.assertEqual(result.status, ToolStatus.SUCCESS)
         self.assertTrue(result.data['ok'])
+        self.assertTrue(result.data['tests_passed'])
         self.assertIn('Ran 1 test', result.data['output'])
         self.assertIn('not an OS sandbox', result.data['isolation'])
+
+    def test_failing_tests_return_assertion_output_as_successful_execution(self):
+        (self.root / 'tests' / 'test_failure.py').write_text(
+            'import unittest\nclass T(unittest.TestCase):\n def test_fails(self): self.assertEqual(1,2)\n',
+            encoding='utf-8')
+        result = self.broker._run(self.task, 'RUN_TESTS', {'target': 'tests/test_failure.py'})
+        self.assertEqual(result.status, ToolStatus.SUCCESS)
+        self.assertTrue(result.data['ok'])
+        self.assertFalse(result.data['tests_passed'])
+        self.assertIn('AssertionError', result.data['output'])
 
     def test_preflight_allows_only_the_zero_permission_test_capability(self):
         (self.root / 'tests' / 'test_math.py').write_text('import unittest\n', encoding='utf-8')

@@ -92,7 +92,8 @@ def _run_tests(root: Path, target: str) -> dict:
             process.stdout.close()
     reader.join(timeout=5)
     text = bytes(output).decode('utf-8', errors='replace')
-    return {'ok': process.returncode == 0 and not timed_out and not overflow.is_set(),
+    return {'ok': not timed_out and not overflow.is_set(),
+            'tests_passed': process.returncode == 0 and not timed_out and not overflow.is_set(),
             'target': normalized, 'return_code': process.returncode,
             'timed_out': timed_out, 'output_truncated': overflow.is_set(),
             'duration_s': round(time.monotonic() - started, 3), 'output': text,

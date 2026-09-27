@@ -362,7 +362,7 @@ def development_job_state_label(state, telemetry, job_id):
     if (state == 'queued' and isinstance(telemetry, dict)
             and telemetry.get('slot_owner_job_id')
             and telemetry.get('slot_owner_job_id') != job_id):
-        return 'QUEUED · WAITING FOR LOCAL MODEL SLOT'
+        return 'QUEUED — WAITING FOR LOCAL MODEL SLOT'
     return str(state).upper()
 
 
@@ -378,7 +378,10 @@ def development_queue_lines(telemetry, job_id, state):
 
     position = value('position') if state == 'queued' else 'not queued'
     owner = telemetry.get('slot_owner_job_id')
-    if owner:
+    owner_state = telemetry.get('slot_owner_state')
+    if owner_state == 'none':
+        owner_text = 'NONE · no active slot owner'
+    elif owner:
         worker = telemetry.get('slot_owner_worker_id')
         owner_text = str(owner) + (f' · {worker}' if worker else '')
     else:
@@ -386,7 +389,7 @@ def development_queue_lines(telemetry, job_id, state):
     wait = telemetry.get('queue_wait_ms')
     wait_text = f'{wait} ms' if isinstance(wait, int) and not isinstance(wait, bool) else value('queue_wait_ms')
     released = telemetry.get('slot_released_at')
-    release_text = str(released) if released else f"Unknown ({telemetry.get('slot_released_reason', 'not reported')})"
+    release_text = str(released) if released else f"Unknown ({unknown.get('slot_released_at', telemetry.get('slot_released_reason', 'not reported'))})"
     return [
         f"QUEUE DEPTH: {value('queue_depth')} · POSITION: {position} · CAPACITY: {value('capacity')}",
         f"PRIORITY: {value('priority')}", f"QUEUED AT: {value('queued_at')}",
@@ -455,8 +458,11 @@ class ControlCenterApp:
         self._busy = False
         self._dev_worker = None
         self._dev_worker_lock = threading.Lock()
-        self._active_dev_job_id = None
-        self._active_dev_started = None
+        self._dev_jobs = {}
+        self._dev_job_started = {}
+        self._dev_selected_job_id = None
+        self._dev_poll_inflight = set()
+        self._dev_submit_pending = 0
         self._dev_poll_after_id = None
         self._build()
         self.refresh()
@@ -656,16 +662,23 @@ class ControlCenterApp:
         self._chat_objective = objective
         self._chat_submit_button = submit_button
         self._chat_cancel_button = cancel_button
+        jobs_frame = ttk.Frame(self.page)
+        jobs_frame.pack(fill="x", pady=(0, 8))
+        ttk.Label(jobs_frame, text="RECENT LOCAL JOBS · select one to inspect its own telemetry", style="PanelTitle.TLabel").pack(anchor="w")
+        self._chat_jobs_tree = self._tree(("state", "job_id", "queue"), ("State", "Job ID", "Queue"), jobs_frame)
+        self._chat_jobs_tree.configure(height=5)
+        self._chat_jobs_tree.column("state", width=260)
+        self._chat_jobs_tree.column("job_id", width=300)
+        self._chat_jobs_tree.column("queue", width=180)
+        self._chat_jobs_tree.bind("<<TreeviewSelect>>", self._select_dev_job)
         output = tk.Text(self.page, bg="#171d27", fg="#e6eaf0", relief="flat", wrap="word", state="disabled")
         output.pack(fill="both", expand=True)
         self._chat_output = output
         ttk.Label(self.page, text="Workspace: artifacts/worker-sandbox · approved tools only · no shell · bounded RUN_TESTS · current-user permissions · not an OS sandbox", style="Muted.TLabel").pack(anchor="w", pady=8)
-        active = bool(self._active_dev_job_id or getattr(self, "_dev_submit_pending", False))
-        submit_button.configure(state="disabled" if active else "normal")
-        cancel_button.configure(state="normal" if self._active_dev_job_id else "disabled")
-        self._render_dev_job(self._dev_last_display if hasattr(self, "_dev_last_display") else "Ready · Ollama 11434")
-        if self._active_dev_job_id:
-            self._schedule_dev_poll(0)
+        submit_button.configure(state="normal")
+        self._refresh_dev_cancel_button()
+        self._render_selected_dev_job()
+        threading.Thread(target=self._load_dev_jobs_background, daemon=True).start()
 
     def _get_dev_worker(self):
         if self._dev_worker is not None:
@@ -698,17 +711,13 @@ class ControlCenterApp:
         widget.configure(state="disabled")
 
     def _submit_dev_job(self):
-        if self._active_dev_job_id or getattr(self, "_dev_submit_pending", False):
-            return
         text = self._chat_objective.get("1.0", "end").strip()
         if not text:
             messagebox.showinfo("Local Qwen", "Enter a bounded task.")
             return
-        self._dev_submit_pending = True
-        self._chat_submit_button.configure(state="disabled")
-        self._chat_cancel_button.configure(state="disabled")
-        self._active_dev_started = time.monotonic()
-        self._render_dev_job("SUBMITTING · LOCAL 11434 · one job at a time\nTESTS: NOT RUN YET · bounded RUN_TESTS available")
+        self._dev_submit_pending += 1
+        if not self._dev_jobs:
+            self._render_dev_job("SUBMITTING · LOCAL 11434 · existing single-slot queue\nTESTS: NOT RUN YET · bounded RUN_TESTS available")
         threading.Thread(target=self._submit_dev_job_background, args=(text,), daemon=True).start()
 
     def _submit_dev_job_background(self, objective):
@@ -721,38 +730,109 @@ class ControlCenterApp:
             self.root.after(0, lambda msg=message: self._dev_submit_failed(msg))
 
     def _dev_job_submitted(self, job):
-        self._dev_submit_pending = False
-        self._active_dev_job_id = str(job.job_id)
-        self._set_dev_chat_buttons(submit="disabled", cancel="normal")
-        self._render_dev_job(f"JOB: {job.job_id}\nSTATE: {job.state.value}\nQUEUE POSITION: {self._unknown()}\nTESTS: NOT RUN YET · bounded RUN_TESTS available")
+        self._dev_submit_pending = max(0, self._dev_submit_pending - 1)
+        job_id = str(job.job_id)
+        self._dev_jobs[job_id] = {"job": job, "state": job.state.value, "telemetry": None,
+                                  "text": f"JOB: {job_id}\nSTATE: {job.state.value}\nQUEUE POSITION: {self._unknown()}\nTESTS: NOT RUN YET · bounded RUN_TESTS available"}
+        self._dev_job_started[job_id] = time.monotonic()
+        self._dev_selected_job_id = job_id
+        self._upsert_dev_job_row(job_id)
+        tree = getattr(self, "_chat_jobs_tree", None)
+        if tree is not None and tree.winfo_exists():
+            tree.selection_set(job_id)
+            tree.focus(job_id)
+        self._refresh_dev_cancel_button()
+        self._render_selected_dev_job()
         self._schedule_dev_poll(0)
 
     def _dev_submit_failed(self, message):
-        self._dev_submit_pending = False
-        self._active_dev_started = None
-        self._set_dev_chat_buttons(submit="normal", cancel="disabled")
-        self._render_dev_job(message)
+        self._dev_submit_pending = max(0, self._dev_submit_pending - 1)
+        if not self._dev_jobs:
+            self._render_dev_job(message)
 
-    def _set_dev_chat_buttons(self, *, submit, cancel):
-        for name, state in (("_chat_submit_button", submit), ("_chat_cancel_button", cancel)):
-            widget = getattr(self, name, None)
-            if widget is not None and widget.winfo_exists():
-                widget.configure(state=state)
+    def _job_is_live(self, job_id):
+        info = self._dev_jobs.get(job_id) or {}
+        return info.get("state") in {"queued", "claimed", "running", "cancel_requested", "retry_wait"}
+
+    def _refresh_dev_cancel_button(self):
+        widget = getattr(self, "_chat_cancel_button", None)
+        if widget is not None and widget.winfo_exists():
+            selected = self._dev_selected_job_id
+            widget.configure(state="normal" if selected and self._job_is_live(selected) else "disabled")
+
+    def _upsert_dev_job_row(self, job_id):
+        tree = getattr(self, "_chat_jobs_tree", None)
+        if tree is None or not tree.winfo_exists():
+            return
+        info = self._dev_jobs.get(job_id) or {}
+        job = info.get("job")
+        state = info.get("state") or getattr(getattr(job, "state", None), "value", "unknown")
+        telemetry = info.get("telemetry") or {}
+        state_label = development_job_state_label(state, telemetry, job_id)
+        queue = telemetry.get("position")
+        depth = telemetry.get("queue_depth")
+        capacity = telemetry.get("capacity")
+        queue_text = (f"{queue if queue is not None else self._unknown()} / {depth if depth is not None else self._unknown()} · cap {capacity if capacity is not None else self._unknown()}")
+        values = (state_label, job_id, queue_text)
+        if tree.exists(job_id):
+            tree.item(job_id, values=values)
+        else:
+            tree.insert("", "end", iid=job_id, values=values)
+
+    def _select_dev_job(self, _event=None):
+        tree = getattr(self, "_chat_jobs_tree", None)
+        selection = tree.selection() if tree is not None and tree.winfo_exists() else ()
+        if selection:
+            self._dev_selected_job_id = selection[0]
+            self._refresh_dev_cancel_button()
+            self._render_selected_dev_job()
+
+    def _render_selected_dev_job(self):
+        selected = self._dev_selected_job_id
+        info = self._dev_jobs.get(selected) if selected else None
+        if info:
+            self._render_dev_job(info.get("text", f"JOB: {selected}\nSTATUS: {self._unknown()}"))
+        elif not self._dev_jobs:
+            self._render_dev_job(self._dev_last_display if hasattr(self, "_dev_last_display") else "Ready · Ollama 11434")
+
+    def _load_dev_jobs_background(self):
+        try:
+            jobs = self._get_dev_worker().list_jobs(limit=25)
+            self.root.after(0, lambda: self._dev_jobs_loaded(jobs))
+        except Exception:
+            return
+
+    def _dev_jobs_loaded(self, jobs):
+        for job in reversed(jobs):
+            job_id = str(job.job_id)
+            self._dev_jobs.setdefault(job_id, {"job": job, "state": job.state.value, "telemetry": None,
+                                               "details_loaded": False,
+                                               "text": f"JOB: {job_id}\nSTATE: {job.state.value}\nLoading durable telemetry…"})
+            self._upsert_dev_job_row(job_id)
+        if self._dev_selected_job_id is None and self._dev_jobs:
+            self._dev_selected_job_id = next(reversed(self._dev_jobs))
+            tree = getattr(self, "_chat_jobs_tree", None)
+            if tree is not None and tree.winfo_exists():
+                tree.selection_set(self._dev_selected_job_id)
+        self._render_selected_dev_job()
+        self._schedule_dev_poll(0)
 
     @staticmethod
     def _unknown():
         return "Unknown (not reported)"
 
     def _schedule_dev_poll(self, delay_ms=1500):
-        if self._active_dev_job_id and self._dev_poll_after_id is None:
+        if any(self._job_is_live(job_id) or not info.get("details_loaded")
+               for job_id, info in self._dev_jobs.items()) and self._dev_poll_after_id is None:
             self._dev_poll_after_id = self.root.after(delay_ms, self._poll_dev_job)
 
     def _poll_dev_job(self):
         self._dev_poll_after_id = None
-        job_id = self._active_dev_job_id
-        if not job_id:
-            return
-        threading.Thread(target=self._poll_dev_job_background, args=(job_id,), daemon=True).start()
+        for job_id in tuple(self._dev_jobs):
+            info = self._dev_jobs.get(job_id) or {}
+            if (self._job_is_live(job_id) or not info.get("details_loaded")) and job_id not in self._dev_poll_inflight:
+                self._dev_poll_inflight.add(job_id)
+                threading.Thread(target=self._poll_dev_job_background, args=(job_id,), daemon=True).start()
 
     def _poll_dev_job_background(self, job_id):
         try:
@@ -760,7 +840,8 @@ class ControlCenterApp:
             job = worker.get(job_id)
             events = worker.events(job_id)
             telemetry = worker.queue_telemetry(job_id)
-            elapsed = time.monotonic() - self._active_dev_started if self._active_dev_started else None
+            started = self._dev_job_started.get(job_id)
+            elapsed = time.monotonic() - started if started is not None else None
             metrics = development_job_metrics(events)
             state_label = development_job_state_label(job.state.value, telemetry, job_id)
             lines = [f"JOB: {job_id}", f"STATE: {state_label}",
@@ -789,37 +870,58 @@ class ControlCenterApp:
                 lines.extend(["", "RESULT", json.dumps(job.result, ensure_ascii=False, indent=2, default=str)])
             if job.failure is not None:
                 lines.extend(["", "FAILURE", json.dumps(job.failure, ensure_ascii=False, indent=2, default=str)])
-            self.root.after(0, lambda: self._dev_job_updated(job_id, "\n".join(lines), terminal))
+            self.root.after(0, lambda: self._dev_job_updated(job_id, job, telemetry, "\n".join(lines), terminal))
         except Exception as exc:
             message = f"JOB: {job_id}\nPOLL ERROR: {type(exc).__name__}: {exc}\nPolling will retry."
-            self.root.after(0, lambda msg=message: self._dev_job_updated(job_id, msg, False))
+            self.root.after(0, lambda msg=message: self._dev_job_updated(job_id, None, None, msg, False))
 
-    def _dev_job_updated(self, job_id, text, terminal):
-        if self._active_dev_job_id != job_id:
-            return
-        self._render_dev_job(text)
+    def _dev_job_updated(self, job_id, job, telemetry, text, terminal):
+        self._dev_poll_inflight.discard(job_id)
+        info = self._dev_jobs.setdefault(job_id, {})
+        if job is not None:
+            info["job"] = job
+            info["state"] = job.state.value
+        if telemetry is not None:
+            info["telemetry"] = telemetry
+        if job is not None and telemetry is not None:
+            info["details_loaded"] = True
+        info["text"] = text
+        self._upsert_dev_job_row(job_id)
+        if self._dev_selected_job_id == job_id:
+            self._render_dev_job(text)
+            self._refresh_dev_cancel_button()
         if terminal:
-            self._active_dev_job_id = None
-            self._active_dev_started = None
-            self._set_dev_chat_buttons(submit="normal", cancel="disabled")
-        else:
-            self._schedule_dev_poll()
+            self._dev_job_started.pop(job_id, None)
+        self._schedule_dev_poll()
 
     def _cancel_dev_job(self):
-        job_id = self._active_dev_job_id
-        if not job_id:
+        job_id = self._dev_selected_job_id
+        if not job_id or not self._job_is_live(job_id):
             return
-        self._set_dev_chat_buttons(submit="disabled", cancel="disabled")
-        self._render_dev_job(f"JOB: {job_id}\nCANCEL REQUESTED\nTESTS: current state remains in event timeline")
+        self._chat_cancel_button.configure(state="disabled")
+        if self._dev_selected_job_id == job_id:
+            self._render_dev_job(f"JOB: {job_id}\nCANCEL REQUESTED\nTESTS: current state remains in event timeline")
         def cancel_background():
+            job = None
             try:
                 job = self._get_dev_worker().cancel(job_id)
                 message = f"JOB: {job_id}\nCANCEL REQUEST STATE: {job.state.value}"
             except Exception as exc:
                 message = f"JOB: {job_id}\nCANCEL ERROR: {type(exc).__name__}: {exc}"
-            self.root.after(0, lambda msg=message: self._render_dev_job(msg))
+            self.root.after(0, lambda msg=message: self._dev_job_cancelled(job_id, job, msg))
             self.root.after(0, self._schedule_dev_poll)
         threading.Thread(target=cancel_background, daemon=True).start()
+
+    def _dev_job_cancelled(self, job_id, job, message):
+        info = self._dev_jobs.setdefault(job_id, {})
+        if job is not None:
+            info["job"] = job
+            info["state"] = job.state.value
+        info["text"] = message
+        self._upsert_dev_job_row(job_id)
+        if self._dev_selected_job_id == job_id:
+            self._render_dev_job(message)
+            self._refresh_dev_cancel_button()
 
     def page_agents(self):
         tree = self._tree(("name", "agent_id", "role", "model_target"), ("Name", "Agent ID", "Role", "Local model"))

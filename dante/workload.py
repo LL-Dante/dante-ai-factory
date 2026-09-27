@@ -608,6 +608,8 @@ class _ActiveAttempt:
     attempt_id: str
     cancellation: threading.Event = field(default_factory=threading.Event)
     finish_lock: threading.Lock = field(default_factory=threading.Lock)
+    slot_lock: threading.Lock = field(default_factory=threading.Lock)
+    slot_acquired: bool = False
     timed_out: bool = False
     worker: threading.Thread | None = None
     reaper: threading.Thread | None = None
@@ -701,23 +703,34 @@ class WorkloadOrchestrator:
                 active.cancellation.set()
         return result
 
+    def _release_slot(self, active: _ActiveAttempt, reason: str) -> bool:
+        """Release the semaphore once and persist the release immediately after it."""
+        with active.slot_lock:
+            if not active.slot_acquired:
+                return False
+            self.resource_gate.release()
+            active.slot_acquired = False
+            self.store.record_event(active.job_id, 'slot_released', attempt_id=active.attempt_id,
+                                    release_reason=reason)
+            return True
+
     def _run_claimed(self, job: JobRecord, attempt_id: str):
         job_id, attempt_id = str(job.job_id), str(attempt_id)
         active = _ActiveAttempt(job_id, attempt_id)
         with self._active_lock:
             self._active[job_id] = active
-        acquired = False
         try:
-            acquired = self.resource_gate.acquire(timeout=0)
-            if not acquired:
+            if not self.resource_gate.acquire(timeout=0):
                 # Single-slot scheduling should make this unreachable; fail closed if violated.
                 self.store.fail(job_id, attempt_id, code='gpu_slot_unavailable', retryable=True)
                 with self._active_lock:
                     self._active.pop(job_id, None)
                 return
+            active.slot_acquired = True
+            self.store.record_event(job_id, 'slot_acquired', attempt_id=attempt_id,
+                                    capacity=self.resource_gate.max_gpu_jobs)
             if not self.store.start_attempt(job_id, attempt_id):
-                self.resource_gate.release()
-                acquired = False
+                self._release_slot(active, 'cancellation')
                 with self._active_lock:
                     self._active.pop(job_id, None)
                 return
@@ -728,8 +741,7 @@ class WorkloadOrchestrator:
                     self.store.record_event(job_id, 'agent.execution.failed', attempt_id=attempt_id,
                         agent_id=spec.agent_task.agent_id, agent_version=spec.agent_task.definition_version,
                         failure_code='deadline_expired', retryable=False)
-                self.resource_gate.release()
-                acquired = False
+                self._release_slot(active, 'failure')
                 with self._active_lock:
                     self._active.pop(job_id, None)
                 return
@@ -806,13 +818,20 @@ class WorkloadOrchestrator:
             def reap_worker():
                 assert active.worker is not None
                 active.worker.join()
-                if acquired:
-                    self.resource_gate.release()
-                with self._active_lock:
-                    self._active.pop(job_id, None)
-                    no_active = not self._active
-                if self.stop_event.is_set() and no_active:
-                    self._finish_stop()
+                try:
+                    state = self.store.get(job_id).state.value
+                    reason = ('safe_termination' if self.stop_event.is_set() else
+                              'success' if state == 'succeeded' else
+                              'cancellation' if state == 'cancelled' else
+                              'failure' if state in {'failed', 'timed_out', 'retry_wait'} else
+                              'safe_termination')
+                    self._release_slot(active, reason)
+                finally:
+                    with self._active_lock:
+                        self._active.pop(job_id, None)
+                        no_active = not self._active
+                    if self.stop_event.is_set() and no_active:
+                        self._finish_stop()
 
             active.worker = threading.Thread(target=execute_and_persist,
                 name='dante-local-inference-' + attempt_id, daemon=False)
@@ -850,8 +869,15 @@ class WorkloadOrchestrator:
                 else:
                     self.state = 'DEGRADED'
         except BaseException:
-            if acquired and (active.worker is None or not active.worker.is_alive()):
-                self.resource_gate.release()
+            if active.slot_acquired and (active.worker is None or not active.worker.is_alive()):
+                try:
+                    state = self.store.get(job_id).state.value
+                except Exception:
+                    state = 'unknown'
+                reason = ('cancellation' if state == 'cancelled' else
+                          'failure' if state in {'failed', 'timed_out', 'retry_wait'} else
+                          'safe_termination')
+                self._release_slot(active, reason)
             with self._active_lock:
                 if active.worker is None or not active.worker.is_alive():
                     self._active.pop(job_id, None)

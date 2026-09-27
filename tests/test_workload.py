@@ -248,6 +248,11 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(record.state, JobState.SUCCEEDED)
         self.assertEqual(record.attempt_count, 1)
         self.assertEqual(record.result['text'], 'local answer')
+        events = self.store.events(str(job.job_id))
+        acquired = next(e for e in events if e['event'] == 'slot_acquired')
+        released = next(e for e in events if e['event'] == 'slot_released')
+        self.assertLessEqual(acquired['event_id'], released['event_id'])
+        self.assertEqual(released['metadata']['release_reason'], 'success')
         self.assertTrue(orchestrator.resource_gate.acquire(timeout=0))
         orchestrator.resource_gate.release()
         self.assertIn('route_selected', [e['event'] for e in self.store.events(job.job_id)])
@@ -288,6 +293,10 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(self.store.get(job.job_id).state, JobState.FAILED)
             self.assertTrue(executor.started.is_set())
             self.assertFalse(orchestrator.resource_gate.acquire(timeout=0))
+            executor.release.set()
+            self.assertTrue(wait_until(lambda: not orchestrator._active))
+            released = next(e for e in self.store.events(str(job.job_id)) if e['event'] == 'slot_released')
+            self.assertEqual(released['metadata']['release_reason'], 'failure')
         finally:
             executor.release.set()
             self.assertTrue(wait_until(lambda: not orchestrator._active))
@@ -351,6 +360,8 @@ class OrchestratorTests(unittest.TestCase):
             executor.release.set()
             runner.join(2)
             self.assertTrue(wait_until(lambda: orchestrator.state == 'STOPPED'))
+            released = next(e for e in self.store.events(str(job.job_id)) if e['event'] == 'slot_released')
+            self.assertEqual(released['metadata']['release_reason'], 'safe_termination')
 
     def test_lifecycle_gpu_slot_remains_owned_until_execution_ends(self):
         self.store.submit(spec(timeout_s=0.08, maximum_attempts=1))
@@ -455,6 +466,8 @@ class OrchestratorTests(unittest.TestCase):
         self.assertTrue(executor.cancelled.is_set())
         self.assertEqual(self.store.get(job.job_id).state, JobState.CANCELLED)
         self.assertIsNone(self.store.get(job.job_id).result)
+        released = next(e for e in self.store.events(str(job.job_id)) if e['event'] == 'slot_released')
+        self.assertEqual(released['metadata']['release_reason'], 'cancellation')
 
     def test_node0_executor_uses_existing_supervisor_interface(self):
         metadata = type('Metadata', (), {'runtime_reference': 'qwen3:4b', 'runtime_digest': DIGEST})()

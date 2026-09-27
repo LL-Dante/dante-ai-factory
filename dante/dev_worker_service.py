@@ -251,32 +251,54 @@ class DevelopmentWorkerService:
 
         attempt_id = str(job.current_attempt_id) if job.current_attempt_id else None
         acquired = next((event for event in reversed(events)
-            if event.get('event') == 'attempt_started' and event.get('attempt_id') == attempt_id), None)
+            if event.get('event') == 'slot_acquired' and event.get('attempt_id') == attempt_id), None)
+        if acquired is None:  # Compatibility with attempts persisted before slot events existed.
+            acquired = next((event for event in reversed(events)
+                if event.get('event') == 'attempt_started' and event.get('attempt_id') == attempt_id), None)
         slot_acquired_at = acquired.get('timestamp_utc') if acquired else None
+        released = next((event for event in reversed(events)
+            if event.get('event') == 'slot_released' and event.get('attempt_id') == attempt_id), None)
+        slot_released_at = released.get('timestamp_utc') if released else None
+        slot_released_reason = ((released.get('metadata') or {}).get('release_reason')
+                                if released else None)
 
-        def has_acquired_attempt(candidate, candidate_events):
+        def attempt_slot_events(candidate, candidate_events):
             current = str(candidate.current_attempt_id) if candidate.current_attempt_id else None
-            return bool(current and any(event.get('event') == 'attempt_started'
-                and event.get('attempt_id') == current for event in candidate_events))
+            if not current:
+                return False, False
+            acquired_event = any(event.get('event') in {'slot_acquired', 'attempt_started'}
+                                 and event.get('attempt_id') == current for event in candidate_events)
+            released_event = any(event.get('event') == 'slot_released'
+                                 and event.get('attempt_id') == current for event in candidate_events)
+            return acquired_event, released_event
 
         owners = []
+        unresolved_active = False
         for candidate in records:
             if candidate.state.value not in {'running', 'cancel_requested'}:
                 continue
             candidate_events = self.store.events(str(candidate.job_id))
-            if has_acquired_attempt(candidate, candidate_events):
+            has_acquired, has_released = attempt_slot_events(candidate, candidate_events)
+            if has_acquired and not has_released:
                 claimed = next((event for event in reversed(candidate_events)
                     if event.get('event') == 'claimed'
                     and event.get('attempt_id') == str(candidate.current_attempt_id)), None)
                 worker_id = ((claimed or {}).get('metadata') or {}).get('worker_id')
                 owners.append((str(candidate.job_id), worker_id))
+            elif not has_acquired:
+                unresolved_active = True
         owner_reason = None
         if len(owners) == 1:
             owner_job_id, owner_worker_id = owners[0]
+            owner_state = 'active'
+        elif owners or unresolved_active:
+            owner_job_id = owner_worker_id = None
+            owner_state = 'unknown'
+            owner_reason = ('multiple active slot owners found in durable state' if owners else
+                            'active attempt has no durable slot-acquisition event')
         else:
             owner_job_id = owner_worker_id = None
-            owner_reason = ('multiple active slot owners found in durable state' if owners else
-                            'no active attempt_started event found')
+            owner_state = 'none'
 
         def parse_stamp(value):
             try:
@@ -306,21 +328,24 @@ class DevelopmentWorkerService:
         if state == 'queued' and position is None:
             unknown['position'] = 'queued job is outside the available queue listing'
         if slot_acquired_at is None:
-            unknown['slot_acquired_at'] = 'no attempt_started event for the current attempt'
+            unknown['slot_acquired_at'] = 'no slot-acquisition event for the current attempt'
         if owner_reason:
             unknown['slot_owner'] = owner_reason
         if wait_reason:
             unknown['queue_wait_ms'] = wait_reason
-        unknown['slot_released_at'] = 'no durable slot-release event is recorded'
+        if slot_released_at is None:
+            unknown['slot_released_at'] = 'no durable slot-release event for the current attempt'
+            slot_released_reason = 'no durable slot-release event for the current attempt'
         return {
             'capacity': self.orchestrator.resource_gate.max_gpu_jobs,
             'queue_depth': depth, 'position': position, 'priority': job.priority,
             'queued_at': queued_at, 'queued_at_source': queued_source,
             'slot_acquired_at': slot_acquired_at,
-            'slot_released_at': None,
-            'slot_released_reason': 'no durable slot-release event is recorded',
+            'slot_released_at': slot_released_at,
+            'slot_released_reason': slot_released_reason,
             'queue_wait_ms': queue_wait_ms,
             'slot_owner_job_id': owner_job_id, 'slot_owner_worker_id': owner_worker_id,
+            'slot_owner_state': owner_state,
             'unknown_reasons': unknown,
         }
 

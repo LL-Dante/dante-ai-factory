@@ -1,7 +1,9 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from dante.control_center_gui import (
+    ControlCenterApp,
     OLLAMA_ENDPOINT,
     build_model_rows,
     build_ollama_status,
@@ -41,17 +43,88 @@ class ControlCenterGuiPresentationTests(unittest.TestCase):
         telemetry = {
             'capacity': 1, 'queue_depth': 1, 'position': 1, 'priority': 4,
             'queued_at': '2026-09-27T14:00:00+00:00', 'slot_acquired_at': None,
-            'slot_released_at': None, 'slot_released_reason': 'no durable release event is recorded',
+            'slot_released_at': None, 'slot_released_reason': 'no durable slot-release event for the current attempt',
             'queue_wait_ms': 125, 'slot_owner_job_id': 'job-owner',
-            'slot_owner_worker_id': 'worker-1', 'unknown_reasons': {},
+            'slot_owner_worker_id': 'worker-1', 'slot_owner_state': 'active', 'unknown_reasons': {},
         }
         self.assertEqual(development_job_state_label('queued', telemetry, 'job-waiter'),
-                         'QUEUED · WAITING FOR LOCAL MODEL SLOT')
+                         'QUEUED — WAITING FOR LOCAL MODEL SLOT')
         lines = development_queue_lines(telemetry, 'job-waiter', 'queued')
         self.assertIn('QUEUE DEPTH: 1 · POSITION: 1 · CAPACITY: 1', lines)
         self.assertIn('LOCAL MODEL SLOT OWNER: job-owner · worker-1', lines)
         self.assertIn('CURRENT QUEUE WAIT: 125 ms', lines)
-        self.assertIn('SLOT RELEASED AT: Unknown (no durable release event is recorded)', lines)
+        self.assertIn('SLOT RELEASED AT: Unknown (no durable slot-release event for the current attempt)', lines)
+
+    def test_released_slot_is_rendered_as_none_not_historical_owner(self):
+        lines = development_queue_lines({
+            'capacity': 1, 'queue_depth': 0, 'position': None, 'priority': 0,
+            'slot_owner_state': 'none', 'slot_owner_job_id': None, 'slot_owner_worker_id': None,
+            'slot_released_at': '2026-09-27T18:00:00+00:00', 'slot_released_reason': 'success',
+            'unknown_reasons': {},
+        }, 'job-done', 'succeeded')
+        self.assertIn('LOCAL MODEL SLOT OWNER: NONE · no active slot owner', lines)
+        self.assertIn('SLOT RELEASED AT: 2026-09-27T18:00:00+00:00', lines)
+
+    def test_active_job_does_not_disable_submit_and_second_job_is_registered(self):
+        app = object.__new__(ControlCenterApp)
+        app._chat_objective = SimpleNamespace(get=lambda *_args: 'bounded second job')
+        app._chat_submit_button = SimpleNamespace(state='normal')
+        app._chat_cancel_button = SimpleNamespace(configure=lambda **_kwargs: None, winfo_exists=lambda: True)
+        app._dev_jobs = {'job-A': {'state': 'running', 'text': 'A is still running'}}
+        app._dev_job_started = {'job-A': 1.0}
+        app._dev_selected_job_id = 'job-A'
+        app._dev_submit_pending = 0
+        app._dev_poll_after_id = 'pending'
+        app._dev_poll_inflight = set()
+        app.root = SimpleNamespace(callbacks=[], after=lambda _delay, callback: app.root.callbacks.append(callback) or 'scheduled')
+        app._render_dev_job = Mock()
+        app._schedule_dev_poll = Mock()
+        app._upsert_dev_job_row = Mock()
+        submitted = SimpleNamespace(job_id='job-B', state=SimpleNamespace(value='queued'))
+        app._get_dev_worker = lambda: SimpleNamespace(submit=lambda _text: submitted)
+
+        class CapturedThread:
+            created = []
+
+            def __init__(self, *, target, args=(), daemon=None):
+                self.target, self.args = target, args
+                self.created.append(self)
+
+            def start(self):
+                return None
+
+        with patch('dante.control_center_gui.threading.Thread', CapturedThread):
+            app._submit_dev_job()
+            self.assertEqual(app._chat_submit_button.state, 'normal')
+            self.assertEqual(app._dev_jobs['job-A']['state'], 'running')
+            CapturedThread.created[0].target(*CapturedThread.created[0].args)
+            app.root.callbacks.pop(0)()
+
+        self.assertEqual(set(app._dev_jobs), {'job-A', 'job-B'})
+        self.assertNotEqual('job-A', 'job-B')
+        self.assertEqual(app._dev_jobs['job-B']['state'], 'queued')
+        self.assertEqual(app._dev_selected_job_id, 'job-B')
+
+    def test_polling_completed_job_does_not_replace_selected_job(self):
+        app = object.__new__(ControlCenterApp)
+        app._dev_jobs = {
+            'job-A': {'state': 'running', 'text': 'A running'},
+            'job-B': {'state': 'queued', 'text': 'B queued'},
+        }
+        app._dev_selected_job_id = 'job-B'
+        app._dev_poll_inflight = {'job-A'}
+        app._dev_job_started = {'job-A': 1.0}
+        app._upsert_dev_job_row = Mock()
+        app._render_dev_job = Mock()
+        app._refresh_dev_cancel_button = Mock()
+        app._schedule_dev_poll = Mock()
+        completed = SimpleNamespace(state=SimpleNamespace(value='succeeded'))
+        app._dev_job_updated('job-A', completed, {'slot_released_at': 'A release'}, 'A completed', True)
+        self.assertEqual(app._dev_jobs['job-A']['state'], 'succeeded')
+        self.assertEqual(app._dev_jobs['job-A']['telemetry'], {'slot_released_at': 'A release'})
+        self.assertEqual(app._dev_jobs['job-B']['state'], 'queued')
+        self.assertEqual(app._dev_jobs['job-B']['text'], 'B queued')
+        app._render_dev_job.assert_not_called()
 
     def test_development_worker_metrics_use_reported_event_values(self):
         facts = development_job_metrics([

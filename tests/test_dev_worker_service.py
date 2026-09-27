@@ -1,9 +1,10 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-from threading import Event
+from threading import Event, Lock
 from types import SimpleNamespace
 import httpx
 
@@ -212,7 +213,89 @@ class DevelopmentQueueTelemetryTests(unittest.TestCase):
                 owner = service.queue_telemetry(str(first.job_id))
                 self.assertIsNotNone(owner['slot_acquired_at'])
                 self.assertIsInstance(owner['queue_wait_ms'], int)
+                self.assertEqual(owner['slot_owner_state'], 'active')
             finally:
+                service.close()
+
+    def test_two_jobs_share_single_slot_and_second_runs_after_release(self):
+        class GatedAgentExecutor:
+            def __init__(self):
+                self.a_started, self.release_a = Event(), Event()
+                self.b_started, self.release_b = Event(), Event()
+                self.lock = Lock()
+                self.active = 0
+                self.max_active = 0
+
+            def execute_agent(self, job, spec, _cancellation):
+                job_id = str(job.job_id)
+                with self.lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    if 'job A' in spec.agent_task.objective:
+                        self.a_started.set()
+                        if not self.release_a.wait(5):
+                            raise TimeoutError('test gate A was not released')
+                    else:
+                        self.b_started.set()
+                        if not self.release_b.wait(5):
+                            raise TimeoutError('test gate B was not released')
+                    return SimpleNamespace(text=f'completed {job_id}', model_id=spec.model.model_id,
+                        provider_id='dev-qwen', fallback=False, runtime='ollama', metadata={})
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / 'sandbox'
+            workspace.mkdir()
+            service = DevelopmentWorkerService(root / 'dante.db',
+                DevelopmentQwenAdapter(), dev_model(), workspace)
+            executor = GatedAgentExecutor()
+            service.orchestrator.executor = executor
+            try:
+                first = service.submit('job A: safe controlled queue test')
+                self.assertTrue(executor.a_started.wait(3), 'A did not enter its executor')
+                second = service.submit('job B: safe controlled queue test')
+                self.assertNotEqual(str(first.job_id), str(second.job_id))
+                self.assertEqual(service.get(str(second.job_id)).state.value, 'queued')
+                second_events = service.events(str(second.job_id))
+                self.assertIn('submitted', [event['event'] for event in second_events])
+                self.assertNotIn('slot_acquired', [event['event'] for event in second_events])
+                waiting = service.queue_telemetry(str(second.job_id))
+                self.assertEqual(waiting['capacity'], 1)
+                self.assertEqual(waiting['slot_owner_job_id'], str(first.job_id))
+                self.assertEqual(waiting['slot_owner_state'], 'active')
+
+                executor.release_a.set()
+                self.assertTrue(executor.b_started.wait(3), 'B did not run after A released the slot')
+                first_events = service.events(str(first.job_id))
+                second_events = service.events(str(second.job_id))
+                first_acquired = next(e for e in first_events if e['event'] == 'slot_acquired')
+                second_submitted = next(e for e in second_events if e['event'] == 'submitted')
+                first_released = next(e for e in first_events if e['event'] == 'slot_released')
+                second_acquired = next(e for e in second_events if e['event'] == 'slot_acquired')
+                stamp = lambda event: datetime.fromisoformat(event['timestamp_utc'].replace('Z', '+00:00'))
+                self.assertLess(stamp(first_acquired), stamp(second_submitted))
+                self.assertLess(stamp(second_submitted), stamp(first_released))
+                self.assertLessEqual(stamp(first_released), stamp(second_acquired))
+                self.assertEqual(first_released['metadata']['release_reason'], 'success')
+                self.assertEqual(executor.max_active, 1)
+                first_telemetry = service.queue_telemetry(str(first.job_id))
+                self.assertEqual(first_telemetry['slot_owner_job_id'], str(second.job_id))
+                self.assertEqual(first_telemetry['slot_released_at'], first_released['timestamp_utc'])
+                self.assertNotEqual(first_telemetry['slot_owner_job_id'], str(first.job_id))
+                executor.release_b.set()
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and service.get(str(second.job_id)).state.value != 'succeeded':
+                    time.sleep(0.01)
+                self.assertEqual(service.get(str(second.job_id)).state.value, 'succeeded')
+                self.assertIsNone(service.queue_telemetry(str(first.job_id))['slot_owner_job_id'])
+                self.assertEqual(service.queue_telemetry(str(first.job_id))['slot_owner_state'], 'none')
+            finally:
+                executor.release_a.set()
+                executor.release_b.set()
                 service.close()
 
 

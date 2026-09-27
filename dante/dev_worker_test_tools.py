@@ -34,7 +34,7 @@ def _run_tests(root: Path, target: str) -> dict:
     started = time.monotonic()
     module_path = (root / 'tests' / parts[1]).as_posix()
     bootstrap = (
-        'import importlib.util,sys,unittest; '
+        'import importlib.util,sys,unittest; sys.path.insert(0, ' + repr(str(root)) + '); '
         'spec=importlib.util.spec_from_file_location("_dante_selected_test", ' + repr(module_path) + '); '
         'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
         'suite=unittest.defaultTestLoader.loadTestsFromModule(module); '

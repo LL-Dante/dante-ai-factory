@@ -21,8 +21,10 @@ class DevelopmentTestToolTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_runs_only_selected_unittest_file(self):
+        (self.root / 'calculator.py').write_text('def add(a, b): return a + b\n', encoding='utf-8')
         (self.root / 'tests' / 'test_math.py').write_text(
-            'import unittest\nclass T(unittest.TestCase):\n def test_ok(self): self.assertEqual(2+2,4)\n',
+            'import unittest\nfrom calculator import add\n'
+            'class T(unittest.TestCase):\n def test_ok(self): self.assertEqual(add(2,2),4)\n',
             encoding='utf-8')
         result = self.broker._run(self.task, 'RUN_TESTS', {'target': 'tests/test_math.py'})
         self.assertEqual(result.status, ToolStatus.SUCCESS)

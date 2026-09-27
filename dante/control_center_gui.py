@@ -115,16 +115,20 @@ def build_ollama_status(online, tags_payload, ps_payload, errors=()):
     }
 
 
-def build_model_rows(snapshot, ollama_state):
+def build_model_rows(snapshot, ollama_state, opencode_limits=None):
     """Assemble Models-page rows; metadata max context and resident runtime
     context are separate columns and missing facts stay explicitly unknown."""
+    limits = read_opencode_limits() if opencode_limits is None else opencode_limits
+    configured_context = limits.get("context", "Unknown")
     rows, seen = [], set()
     for runtime in (snapshot.runtimes if snapshot else ()):
         for model in runtime.installed_models:
+            model_context = configured_context if model.runtime_reference == "dante-qwen-agent:latest" else "Not applicable"
             rows.append((model.runtime_reference, runtime.endpoint, "Unknown (not reported)", "Unknown (not reported)",
                          display_fact(model.quantization), "Unknown (not reported)", "Unknown (not reported)",
                          "Unknown (not reported)",
-                         display_fact(model.size_bytes, scale=1 / (1024 ** 3), suffix=" GiB"), "Unknown (not reported)"))
+                         display_fact(model.size_bytes, scale=1 / (1024 ** 3), suffix=" GiB"), "Unknown (not reported)",
+                         model_context))
             seen.add(model.runtime_reference)
     online = bool(ollama_state.get("online"))
     resident_by_name = {m.get("name"): m for m in ollama_state.get("resident", [])}
@@ -139,13 +143,14 @@ def build_model_rows(snapshot, ollama_state):
             runtime_context = "NOT LOADED (unknown)"
         else:
             runtime_context = "Unknown (not reported)"
+        model_context = configured_context if name == "dante-qwen-agent:latest" else "Not applicable"
         rows.append((name, OLLAMA_ENDPOINT, "AVAILABLE" if online else "OFFLINE",
                      "LOADED" if resident else ("NOT LOADED" if online else "Unknown (not reported)"),
                      model.get("quantization", "Unknown (not reported)"),
                      model.get("max_context", "Unknown (not reported)"),
                      runtime_context,
                      resident.get("size_vram", "Unknown (not reported)") if resident else "Unknown (not reported)",
-                     model.get("size", "Unknown (not reported)"), "Unknown (not reported)"))
+                     model.get("size", "Unknown (not reported)"), "Unknown (not reported)", model_context))
     return rows
 
 
@@ -680,9 +685,9 @@ class ControlCenterApp:
     def page_models(self):
         rows = build_model_rows(self.snapshot, self.ollama)
         tree = self._tree(
-            ("model", "endpoint", "availability", "residency", "quantization", "max_context", "runtime_context", "vram", "size", "slot"),
+            ("model", "endpoint", "availability", "residency", "quantization", "max_context", "runtime_context", "vram", "size", "slot", "configured_context"),
             ("Model", "Runtime endpoint", "Availability", "Loaded", "Quantization",
-             "Max context (metadata)", "Runtime context (loaded)", "VRAM", "Size", "Slot state"))
+             "Max context (metadata)", "Runtime context (loaded)", "VRAM", "Size", "Slot state", "OpenCode configured context"))
         for row in rows:
             tree.insert("", "end", values=row)
         if not rows:

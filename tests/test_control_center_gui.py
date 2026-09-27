@@ -274,17 +274,31 @@ class ModelRowsContextTests(unittest.TestCase):
         self.assertEqual(row[5], "40960")
         self.assertEqual(row[6], "Unknown (not reported)")
 
-    def test_inventory_rows_use_ten_fields_with_size_in_size_column(self):
+    def test_inventory_rows_keep_size_column_and_add_configured_context(self):
         size = SimpleNamespace(kind="measured", value=3758096384, reason=None, source="")
         model = SimpleNamespace(runtime_reference="m1", quantization=None, size_bytes=size)
         runtime = SimpleNamespace(endpoint="http://runtime", installed_models=[model])
         snapshot = SimpleNamespace(runtimes=[runtime])
         (row,) = build_model_rows(snapshot, {"online": False, "installed": [], "resident": []})
-        self.assertEqual(len(row), 10)
+        self.assertEqual(len(row), 11)
         self.assertEqual(row[8], "3.5 GiB")
         self.assertEqual(row[0], "m1")
         self.assertEqual(row[5], "Unknown (not reported)")
         self.assertEqual(row[6], "Unknown (not reported)")
+        self.assertEqual(row[-1], "Not applicable")
+
+    def test_qwen_model_row_shows_configured_opencode_context(self):
+        state = build_ollama_status(True, {"models": [{"name": "dante-qwen-agent:latest"}]}, {"models": []})
+        (row,) = build_model_rows(None, state, opencode_limits={"context": "65536"})
+        self.assertEqual(len(row), 11)
+        self.assertEqual(row[5], "Unknown (not reported)")
+        self.assertEqual(row[6], "NOT LOADED (unknown)")
+        self.assertEqual(row[-1], "65536")
+
+    def test_other_model_row_marks_configured_qwen_context_not_applicable(self):
+        state = build_ollama_status(True, {"models": [{"name": "another-model"}]}, {"models": []})
+        (row,) = build_model_rows(None, state, opencode_limits={"context": "65536"})
+        self.assertEqual(row[-1], "Not applicable")
 
     def test_no_snapshot_rows_do_not_infer_context(self):
         state = build_ollama_status(True, {"models": [{"name": "m1"}]}, {"models": []})

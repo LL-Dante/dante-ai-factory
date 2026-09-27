@@ -13,6 +13,7 @@ from dante.control_center_gui import (
     job_counts,
     job_details_text,
     job_group,
+    filter_log_jobs,
     hardware_rows,
     job_phase,
     job_submission_text,
@@ -84,6 +85,14 @@ class ControlCenterGuiPresentationTests(unittest.TestCase):
                 self.assertEqual(job_group({"state": state}), group)
         self.assertEqual(job_group(None), "UNKNOWN")
         self.assertEqual(job_group("malformed"), "UNKNOWN")
+
+    def test_log_filters_use_only_job_id_and_lifecycle_group(self):
+        jobs = [{"job_id": "job-alpha", "state": "running"},
+                {"job_id": "job-beta", "state": "queued"},
+                {"job_id": "job-gamma", "state": "failed"}]
+        self.assertEqual([j["job_id"] for j in filter_log_jobs(jobs, job_id="BETA")], ["job-beta"])
+        self.assertEqual([j["job_id"] for j in filter_log_jobs(jobs, group="FAILED")], ["job-gamma"])
+        self.assertEqual([j["job_id"] for j in filter_log_jobs(jobs, job_id="job-", group="RUNNING")], ["job-alpha"])
 
     def test_job_details_keep_unreported_tokens_and_metrics_explicit(self):
         text = job_details_text({"job_id": "job-2", "state": "queued", "priority": 1})

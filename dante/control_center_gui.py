@@ -180,6 +180,14 @@ def job_group(job):
     return "UNKNOWN"
 
 
+def filter_log_jobs(jobs, *, job_id="", group="ALL"):
+    """Filter only fields present in the recent-job summary records."""
+    needle = str(job_id).strip().lower()
+    return [job for job in (jobs or []) if isinstance(job, dict)
+            and (not needle or needle in str(job.get("job_id", "")).lower())
+            and (group == "ALL" or job_group(job) == group)]
+
+
 def hardware_rows(snapshot, ollama):
     """Render only already collected hardware and dev-runtime facts."""
     rows = []
@@ -662,13 +670,41 @@ class ControlCenterApp:
         ttk.Label(self.page, text=note, style="Muted.TLabel").pack(anchor="w", pady=8)
 
     def page_logs(self):
+        filter_row = ttk.Frame(self.page)
+        filter_row.pack(fill="x", pady=(0, 8))
+        id_box = ttk.Frame(filter_row)
+        id_box.pack(side="left")
+        ttk.Label(id_box, text="Job ID", style="Muted.TLabel").pack(side="left")
+        group_box = ttk.Frame(filter_row)
+        group_box.pack(side="left", padx=16, fill="x", expand=True)
+        ttk.Label(group_box, text="Lifecycle group", style="Muted.TLabel").pack(side="left")
+        groups = ("ALL", "RUNNING", "QUEUED", "COMPLETED", "FAILED", "CANCELLED", "UNKNOWN")
+        entry_var = tk.StringVar(self.page)
+        entry = tk.Entry(id_box, width=22, textvariable=entry_var)
+        entry.pack(side="left", padx=8)
+        filter_var = tk.StringVar(self.page, value="ALL")
+        filter_box = ttk.Combobox(group_box, textvariable=filter_var, state="readonly", values=list(groups), width=12)
+        filter_box.pack(side="left", padx=8)
         box = tk.Text(self.page, bg="#171d27", fg="#cdd6e2", relief="flat", wrap="none")
         box.pack(fill="both", expand=True)
-        box.insert("end", "Recent durable job activity\n\n")
-        for job in self.jobs:
-            box.insert("end", f"{job.get('updated_at')}  {job_label(job)[0]}  {job.get('job_id')}\n")
-        box.insert("end", "\nDetailed event metadata is available in Jobs → Details / events.\n")
-        box.configure(state="disabled")
+        scroll = ttk.Scrollbar(self.page, orient="horizontal", command=box.xview)
+        scroll.pack(fill="x")
+        box.configure(xscrollcommand=scroll.set)
+        def render(*_args):
+            rows = filter_log_jobs(self.jobs, job_id=entry_var.get(), group=filter_var.get())
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            box.insert("end", "Recent durable job activity (summary view of already-reported job records)\n\n")
+            for job in rows:
+                box.insert("end", f"{job.get('updated_at')}  {job_label(job)[0]}  {job.get('job_id')}\n")
+            if not rows:
+                box.insert("end", "(no matching job records)\n")
+            box.insert("end", "\nAgent, severity, component, and event-time filters are unavailable in this summary view; the recent-job summary keeps only job_id / updated_at / state label.\n")
+            box.insert("end", "Durable event details remain in Jobs → Details / events.\n")
+            box.configure(state="disabled")
+        entry_var.trace_add("write", render)
+        filter_box.bind("<<ComboboxSelected>>", render)
+        render()
 
     def page_settings(self):
         state = self.ollama

@@ -13,6 +13,7 @@ from dante.control_center_gui import (
     job_counts,
     job_details_text,
     job_group,
+    hardware_rows,
     job_phase,
     job_submission_text,
     parse_ollama_ps,
@@ -94,6 +95,42 @@ class ControlCenterGuiPresentationTests(unittest.TestCase):
 class OllamaStatusHelpersTests(unittest.TestCase):
     def test_endpoint_is_fixed_local_ollama(self):
         self.assertEqual(OLLAMA_ENDPOINT, "http://127.0.0.1:11434")
+
+    def test_hardware_rows_show_existing_metrics_and_dev_runtime(self):
+        def fact(value):
+            return SimpleNamespace(kind="measured", value=value, source="fixture", reason=None)
+        cpu = SimpleNamespace(**{name: fact(value) for name, value in {
+            "model": "CPU", "physical_cores": 16, "logical_threads": 32,
+            "utilization_percent": 12, "temperature_c": 65, "current_clock_mhz": 3600,
+        }.items()})
+        memory = SimpleNamespace(installed_bytes=fact(32 * 1024 ** 3), available_bytes=fact(12 * 1024 ** 3))
+        gpu = SimpleNamespace(name="GPU", **{name: fact(value) for name, value in {
+            "utilization_percent": 70, "vram_used_bytes": 8 * 1024 ** 3,
+            "vram_free_bytes": 8 * 1024 ** 3, "vram_total_bytes": 16 * 1024 ** 3,
+            "temperature_c": 55, "power_draw_w": 250, "power_limit_w": 360,
+            "sm_clock_mhz": 1800, "memory_clock_mhz": 11000,
+        }.items()})
+        volume = SimpleNamespace(mount_point="C:", free_bytes=fact(200 * 1024 ** 3),
+                                 size_bytes=fact(1000 * 1024 ** 3))
+        store = SimpleNamespace(name="models", exists=fact(True), size_bytes=fact(40 * 1024 ** 3),
+                                file_count=fact(3))
+        snapshot = SimpleNamespace(cpu=cpu, memory=memory, gpus=(gpu,), volumes=(volume,),
+                                   model_stores=(store,))
+        rows = hardware_rows(snapshot, {"online": True, "endpoint": OLLAMA_ENDPOINT})
+        for key, prefix in ((('GPU', 'SM clock'), '1800 MHz'),
+                            (('GPU', 'VRAM used'), '8.0 GiB'),
+                            (('C:', 'Free space'), '200.0 GiB'),
+                            (('models', 'File count'), '3')):
+            row = next(row for row in rows if row[:2] == key)
+            self.assertTrue(row[2].startswith(prefix), row)
+            self.assertEqual(row[3], "fixture")
+        self.assertEqual(rows[-1], ("Development Ollama", "Status", "ONLINE", OLLAMA_ENDPOINT))
+
+    def test_hardware_rows_keeps_runtime_status_when_snapshot_missing(self):
+        self.assertEqual(hardware_rows(None, {"online": False}), [
+            ("Development Ollama", "Status", "OFFLINE", OLLAMA_ENDPOINT)])
+        self.assertEqual(hardware_rows(None, {"online": None}), [
+            ("Development Ollama", "Status", "Unknown (not reported)", OLLAMA_ENDPOINT)])
 
     def test_format_bytes_missing_fact_is_explicit_unknown(self):
         for value in (None, 0, -1, "3.1", True):

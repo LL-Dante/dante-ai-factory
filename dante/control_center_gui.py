@@ -180,6 +180,55 @@ def job_group(job):
     return "UNKNOWN"
 
 
+def hardware_rows(snapshot, ollama):
+    """Render only already collected hardware and dev-runtime facts."""
+    rows = []
+
+    def add(component, label, fact, *, scale=1.0, suffix=""):
+        rows.append((component, label, display_fact(fact, scale=scale, suffix=suffix),
+                     getattr(fact, "source", "") if fact is not None else ""))
+
+    if snapshot is not None:
+        for label, fact in (("Model", snapshot.cpu.model),
+                            ("Physical cores", snapshot.cpu.physical_cores),
+                            ("Logical threads", snapshot.cpu.logical_threads),
+                            ("Utilization", snapshot.cpu.utilization_percent),
+                            ("Temperature", snapshot.cpu.temperature_c),
+                            ("Current clock", snapshot.cpu.current_clock_mhz)):
+            add("CPU", label, fact, suffix="%" if label == "Utilization" else " MHz" if label == "Current clock" else " °C" if label == "Temperature" else "")
+        for label, fact in (("Installed", snapshot.memory.installed_bytes),
+                            ("Available", snapshot.memory.available_bytes)):
+            add("RAM", label, fact, scale=1 / (1024 ** 3), suffix=" GiB")
+        for gpu in snapshot.gpus:
+            for label, fact, kwargs in (
+                ("Utilization", gpu.utilization_percent, {"suffix": "%"}),
+                ("VRAM used", gpu.vram_used_bytes, {"scale": 1 / (1024 ** 3), "suffix": " GiB"}),
+                ("VRAM free", gpu.vram_free_bytes, {"scale": 1 / (1024 ** 3), "suffix": " GiB"}),
+                ("VRAM total", gpu.vram_total_bytes, {"scale": 1 / (1024 ** 3), "suffix": " GiB"}),
+                ("Temperature", gpu.temperature_c, {"suffix": " °C"}),
+                ("Power", gpu.power_draw_w, {"suffix": " W"}),
+                ("Power limit", gpu.power_limit_w, {"suffix": " W"}),
+                ("SM clock", gpu.sm_clock_mhz, {"suffix": " MHz"}),
+                ("Memory clock", gpu.memory_clock_mhz, {"suffix": " MHz"}),
+            ):
+                add(gpu.name, label, fact, **kwargs)
+        for volume in snapshot.volumes:
+            add(volume.mount_point, "Free space", volume.free_bytes,
+                scale=1 / (1024 ** 3), suffix=" GiB")
+            add(volume.mount_point, "Total space", volume.size_bytes,
+                scale=1 / (1024 ** 3), suffix=" GiB")
+        for store in snapshot.model_stores:
+            add(store.name, "Exists", store.exists)
+            add(store.name, "Size", store.size_bytes, scale=1 / (1024 ** 3), suffix=" GiB")
+            add(store.name, "File count", store.file_count)
+
+    state = ("ONLINE" if ollama.get("online") is True else
+             "OFFLINE" if ollama.get("online") is False else "Unknown (not reported)")
+    rows.append(("Development Ollama", "Status", state,
+                 ollama.get("endpoint", OLLAMA_ENDPOINT)))
+    return rows
+
+
 def job_phase(job, events=None):
     """Show a detailed phase only when durable state/event evidence supports it."""
     state = job.get("state")
@@ -605,17 +654,12 @@ class ControlCenterApp:
 
     def page_hardware(self):
         snap = self.snapshot
-        if not snap:
-            ttk.Label(self.page, text="Hardware facts unavailable.", style="Muted.TLabel").pack(anchor="w")
-            return
         tree = self._tree(("component", "fact", "value", "source"), ("Component", "Measurement", "Value", "Source"))
-        facts = [("CPU", "Utilization", snap.cpu.utilization_percent), ("CPU", "Temperature", snap.cpu.temperature_c),
-                 ("RAM", "Installed", snap.memory.installed_bytes), ("RAM", "Available", snap.memory.available_bytes)]
-        for gpu in snap.gpus:
-            facts.extend(((gpu.name, "Utilization", gpu.utilization_percent), (gpu.name, "VRAM used", gpu.vram_used_bytes), (gpu.name, "VRAM total", gpu.vram_total_bytes), (gpu.name, "Temperature", gpu.temperature_c), (gpu.name, "Power draw", gpu.power_draw_w)))
-        for component, name, fact in facts:
-            tree.insert("", "end", values=(component, name, display_fact(fact), fact.source))
-        ttk.Label(self.page, text=f"Snapshot {snap.observed_at.isoformat()} · {snap.probe_version} · read-only · unknown facts are shown explicitly", style="Muted.TLabel").pack(anchor="w", pady=8)
+        for row in hardware_rows(snap, self.ollama):
+            tree.insert("", "end", values=row)
+        note = (f"Snapshot {snap.observed_at.isoformat()} · {snap.probe_version} · read-only · unknown facts are shown explicitly"
+                if snap else "Hardware snapshot unavailable · Development Ollama status is read-only")
+        ttk.Label(self.page, text=note, style="Muted.TLabel").pack(anchor="w", pady=8)
 
     def page_logs(self):
         box = tk.Text(self.page, bg="#171d27", fg="#cdd6e2", relief="flat", wrap="none")

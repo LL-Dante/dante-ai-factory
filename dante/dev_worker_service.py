@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 
@@ -233,6 +234,95 @@ class DevelopmentWorkerService:
             return [item.job_id for item in queued].index(job.job_id) + 1
         except ValueError:
             return None
+
+    def queue_telemetry(self, job_id: str, *, now: datetime | None = None) -> dict:
+        """Expose queue and slot facts supported by the existing durable store."""
+        job = self.store.get(job_id)
+        records = self.store.list(limit=500)
+        state = job.state.value
+        queued = [item for item in records if item.state.value == 'queued']
+        depth = len(queued) if len(records) < 500 else None
+        position = self.queue_position(job_id)
+        events = self.store.events(job_id)
+        submitted = next((event for event in events if event.get('event') == 'submitted'), None)
+        queued_at = (submitted.get('timestamp_utc') if submitted else
+                     (job.created_at.isoformat() if job.created_at else None))
+        queued_source = 'submitted event' if submitted else ('JobRecord.created_at' if queued_at else None)
+
+        attempt_id = str(job.current_attempt_id) if job.current_attempt_id else None
+        acquired = next((event for event in reversed(events)
+            if event.get('event') == 'attempt_started' and event.get('attempt_id') == attempt_id), None)
+        slot_acquired_at = acquired.get('timestamp_utc') if acquired else None
+
+        def has_acquired_attempt(candidate, candidate_events):
+            current = str(candidate.current_attempt_id) if candidate.current_attempt_id else None
+            return bool(current and any(event.get('event') == 'attempt_started'
+                and event.get('attempt_id') == current for event in candidate_events))
+
+        owners = []
+        for candidate in records:
+            if candidate.state.value not in {'running', 'cancel_requested'}:
+                continue
+            candidate_events = self.store.events(str(candidate.job_id))
+            if has_acquired_attempt(candidate, candidate_events):
+                claimed = next((event for event in reversed(candidate_events)
+                    if event.get('event') == 'claimed'
+                    and event.get('attempt_id') == str(candidate.current_attempt_id)), None)
+                worker_id = ((claimed or {}).get('metadata') or {}).get('worker_id')
+                owners.append((str(candidate.job_id), worker_id))
+        owner_reason = None
+        if len(owners) == 1:
+            owner_job_id, owner_worker_id = owners[0]
+        else:
+            owner_job_id = owner_worker_id = None
+            owner_reason = ('multiple active slot owners found in durable state' if owners else
+                            'no active attempt_started event found')
+
+        def parse_stamp(value):
+            try:
+                stamp = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                return stamp.astimezone(timezone.utc) if stamp.tzinfo else None
+            except (TypeError, ValueError):
+                return None
+
+        queued_dt = parse_stamp(queued_at)
+        acquired_dt = parse_stamp(slot_acquired_at)
+        as_of = now or datetime.now(timezone.utc)
+        if as_of.tzinfo is None:
+            raise ValueError('now must be timezone-aware')
+        if queued_dt and acquired_dt:
+            queue_wait_ms = max(0, round((acquired_dt - queued_dt).total_seconds() * 1000))
+            wait_reason = None
+        elif state == 'queued' and queued_dt:
+            queue_wait_ms = max(0, round((as_of.astimezone(timezone.utc) - queued_dt).total_seconds() * 1000))
+            wait_reason = None
+        else:
+            queue_wait_ms = None
+            wait_reason = 'slot acquisition or queued state is not evidenced'
+
+        unknown = {}
+        if depth is None:
+            unknown['queue_depth'] = 'store listing reached its 500-record limit'
+        if state == 'queued' and position is None:
+            unknown['position'] = 'queued job is outside the available queue listing'
+        if slot_acquired_at is None:
+            unknown['slot_acquired_at'] = 'no attempt_started event for the current attempt'
+        if owner_reason:
+            unknown['slot_owner'] = owner_reason
+        if wait_reason:
+            unknown['queue_wait_ms'] = wait_reason
+        unknown['slot_released_at'] = 'no durable slot-release event is recorded'
+        return {
+            'capacity': self.orchestrator.resource_gate.max_gpu_jobs,
+            'queue_depth': depth, 'position': position, 'priority': job.priority,
+            'queued_at': queued_at, 'queued_at_source': queued_source,
+            'slot_acquired_at': slot_acquired_at,
+            'slot_released_at': None,
+            'slot_released_reason': 'no durable slot-release event is recorded',
+            'queue_wait_ms': queue_wait_ms,
+            'slot_owner_job_id': owner_job_id, 'slot_owner_worker_id': owner_worker_id,
+            'unknown_reasons': unknown,
+        }
 
     def cancel(self, job_id: str):
         if self.orchestrator.state == 'RUNNING':

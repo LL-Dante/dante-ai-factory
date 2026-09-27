@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from threading import Event
 from types import SimpleNamespace
@@ -174,6 +175,43 @@ class DevelopmentWorkerServiceTests(unittest.TestCase):
                 self.assertEqual(service.events(str(job.job_id))[0]['event'], 'submitted')
                 cancelled = service.cancel(str(job.job_id))
                 self.assertEqual(cancelled.state.value, 'cancelled')
+            finally:
+                service.close()
+
+
+class DevelopmentQueueTelemetryTests(unittest.TestCase):
+    def test_existing_queue_store_exposes_owner_wait_and_unknown_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / 'sandbox'
+            workspace.mkdir()
+            service = DevelopmentWorkerService(root / 'dante.db',
+                DevelopmentQwenAdapter(), dev_model(), workspace)
+            service.start = lambda: None
+            try:
+                first = service.submit('queue telemetry owner fixture')
+                second = service.submit('queue telemetry waiter fixture')
+                claimed = service.store.claim('queue-telemetry-test')
+                self.assertIsNotNone(claimed)
+                claimed_job, attempt_id = claimed
+                self.assertEqual(str(claimed_job.job_id), str(first.job_id))
+                self.assertTrue(service.store.start_attempt(str(first.job_id), str(attempt_id)))
+
+                now = datetime.now(timezone.utc) + timedelta(milliseconds=25)
+                waiting = service.queue_telemetry(str(second.job_id), now=now)
+                self.assertEqual(waiting['capacity'], 1)
+                self.assertEqual(waiting['queue_depth'], 1)
+                self.assertEqual(waiting['position'], 1)
+                self.assertEqual(waiting['slot_owner_job_id'], str(first.job_id))
+                self.assertEqual(waiting['slot_owner_worker_id'], 'queue-telemetry-test')
+                self.assertIsNone(waiting['slot_acquired_at'])
+                self.assertIsInstance(waiting['queue_wait_ms'], int)
+                self.assertIsNone(waiting['slot_released_at'])
+                self.assertIn('no durable slot-release event', waiting['slot_released_reason'])
+
+                owner = service.queue_telemetry(str(first.job_id))
+                self.assertIsNotNone(owner['slot_acquired_at'])
+                self.assertIsInstance(owner['queue_wait_ms'], int)
             finally:
                 service.close()
 

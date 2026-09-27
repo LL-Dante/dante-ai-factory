@@ -32,9 +32,16 @@ class TestDevWorkerTools(unittest.TestCase):
     def test_list_files_sorted(self):
         (self.root / 'a.txt').write_text('alpha')
         (self.root / 'b.txt').write_text('beta')
+        (self.root / 'subdir').mkdir()
         result = self.broker._run(self.task, 'LIST_FILES', {'path': ''})
         self.assertEqual(result.status, ToolStatus.SUCCESS)
-        self.assertEqual(result.data['entries'], ['a.txt', 'b.txt'])
+        self.assertEqual(result.data['path'], '')
+        self.assertEqual(result.data['entries'], [
+            {'name': 'a.txt', 'type': 'file'},
+            {'name': 'b.txt', 'type': 'file'},
+            {'name': 'subdir', 'type': 'directory'},
+        ])
+        self.assertFalse(result.data['truncated'])
 
     def test_traversal_denied(self):
         result = self.broker.preflight(self.task, 'READ_FILE', {'path': '../outside'})
@@ -43,7 +50,7 @@ class TestDevWorkerTools(unittest.TestCase):
     def test_sensitive_files_are_not_returned(self):
         (self.root / '.env').write_text('unique-secret-marker', encoding='utf-8')
         result = self.broker._run(self.task, 'LIST_FILES', {'path': '.'})
-        self.assertNotIn('.env', result.data['entries'])
+        self.assertNotIn('.env', [item['name'] for item in result.data['entries']])
         read = self.broker._run(self.task, 'READ_FILE', {'path': '.env'})
         self.assertEqual(read.status, ToolStatus.EXECUTION_FAILURE)
 

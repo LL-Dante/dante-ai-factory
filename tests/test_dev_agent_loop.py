@@ -1,4 +1,5 @@
 import json
+import hashlib
 import tempfile
 import time
 import unittest
@@ -43,6 +44,7 @@ class FakeAdapter:
 class FakeBroker:
     def __init__(self):
         self.calls = []
+        self.run_test_outcomes = []
 
     def manifest(self, _tool_id):
         return SimpleNamespace(arguments_schema={'type': 'object', 'properties': {},
@@ -50,6 +52,17 @@ class FakeBroker:
 
     def invoke(self, task, tool_id, args, *, idempotency_key):
         self.calls.append((task.task_id, tool_id, args, idempotency_key))
+        if tool_id == 'RUN_TESTS':
+            passed = self.run_test_outcomes.pop(0) if self.run_test_outcomes else True
+            return ToolResult(status=ToolStatus.SUCCESS,
+                              data={'ok': True, 'tests_passed': passed, 'output': 'private test output'})
+        if tool_id == 'LIST_FILES':
+            return ToolResult(status=ToolStatus.SUCCESS,
+                              data={'ok': True, 'path': args.get('path'), 'entries': ['a.txt']})
+        if tool_id == 'WRITE_FILE':
+            return ToolResult(status=ToolStatus.SUCCESS,
+                              data={'ok': True, 'path': args.get('path'),
+                                    'bytes_written': len(args.get('content', '').encode('utf-8'))})
         return ToolResult(status=ToolStatus.SUCCESS, data={'ok': True, 'content': 'read result'})
 
 
@@ -59,6 +72,7 @@ class DevelopmentAgentLoopTests(unittest.TestCase):
         self.task = Task(goal='bounded loop test', workspace=self.tmp.name)
         self.model = model()
         self.broker = FakeBroker()
+        self.events = []
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -95,7 +109,7 @@ class DevelopmentAgentLoopTests(unittest.TestCase):
     def test_default_budget_allows_final_after_six_tool_steps(self):
         replies = []
         for index in range(6):
-            call = ToolCall(call_id=f'c{index}', name='READ_FILE', arguments={'path': 'a.txt'})
+            call = ToolCall(call_id=f'c{index}', name='READ_FILE', arguments={'path': f'file_{index}.txt'})
             replies.append(response(calls=(call,)))
         replies.append(response('all checks passed'))
         adapter = FakeAdapter(replies)
@@ -103,6 +117,18 @@ class DevelopmentAgentLoopTests(unittest.TestCase):
         result = loop.run('inspect, execute and finalize', Event())
         self.assertEqual((result.status, result.summary), ('DONE', 'all checks passed'))
         self.assertEqual((result.model_calls, result.tool_calls), (7, 6))
+
+    def test_run_tests_event_preserves_boolean_test_outcome(self):
+        call = ToolCall(call_id='test', name='RUN_TESTS', arguments={})
+        adapter = FakeAdapter([response(calls=(call,)), response('test failed as expected')])
+        self.broker.run_test_outcomes = [False]
+        events = []
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model,
+                                    ('RUN_TESTS',), emit=lambda name, **data: events.append((name, data)))
+        result = loop.run('run the test', Event())
+        self.assertEqual(result.status, 'DONE')
+        test_event = next(data for name, data in events if name == 'tool.completed')
+        self.assertIs(test_event['tests_passed'], False)
 
     def test_deadline_cancels_inflight_request(self):
         adapter = FakeAdapter([response('late')], delay=0.03)
@@ -122,6 +148,123 @@ class DevelopmentAgentLoopTests(unittest.TestCase):
         result = loop.run('usage unavailable', Event())
         self.assertIsNone(result.input_tokens)
         self.assertIsNone(result.output_tokens)
+
+    def test_duplicate_list_files_in_one_response_is_guarded_and_ids_map(self):
+        first = ToolCall(call_id='list-1', name='LIST_FILES', arguments={'path': '.'})
+        duplicate = ToolCall(call_id='list-2', name='LIST_FILES', arguments={'path': '.'})
+        adapter = FakeAdapter([response(calls=(first, duplicate)), response('done')])
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model, ('LIST_FILES',))
+        result = loop.run('list once', Event())
+        self.assertEqual(result.status, 'DONE')
+        self.assertEqual(len(self.broker.calls), 1)
+        messages = [message for message in adapter.requests[1].messages if message.role == 'tool']
+        self.assertEqual([message.call_id for message in messages], ['list-1', 'list-2'])
+        duplicate_payload = json.loads(messages[-1].content)
+        self.assertEqual(duplicate_payload['guard'], 'DUPLICATE_TOOL_REQUEST')
+        self.assertEqual(duplicate_payload['message'], 'PREVIOUS RESULT STILL VALID')
+        self.assertEqual(duplicate_payload['previous_call_id'], 'list-1')
+
+    def test_duplicate_read_file_across_turns_reuses_result(self):
+        first = ToolCall(call_id='read-1', name='READ_FILE', arguments={'path': 'a.txt'})
+        duplicate = ToolCall(call_id='read-2', name='READ_FILE', arguments={'path': 'a.txt'})
+        adapter = FakeAdapter([response(calls=(first,)), response(calls=(duplicate,)), response('done')])
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model, ('READ_FILE',))
+        result = loop.run('read once', Event())
+        self.assertEqual(result.status, 'DONE')
+        self.assertEqual(len(self.broker.calls), 1)
+        message = adapter.requests[2].messages[-1]
+        self.assertEqual(message.call_id, 'read-2')
+        self.assertEqual(json.loads(message.content)['previous_call_id'], 'read-1')
+
+    def test_read_cache_invalidated_after_write_file(self):
+        read1 = ToolCall(call_id='r1', name='READ_FILE', arguments={'path': 'a.txt'})
+        write = ToolCall(call_id='w1', name='WRITE_FILE', arguments={'path': 'a.txt', 'content': 'new'})
+        read2 = ToolCall(call_id='r2', name='READ_FILE', arguments={'path': 'a.txt'})
+        adapter = FakeAdapter([response(calls=(read1,)), response(calls=(write,)),
+                               response(calls=(read2,)), response('done')])
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model,
+                                    ('READ_FILE', 'WRITE_FILE'))
+        result = loop.run('edit then reread', Event())
+        self.assertEqual(result.status, 'DONE')
+        self.assertEqual([call[1] for call in self.broker.calls], ['READ_FILE', 'WRITE_FILE', 'READ_FILE'])
+
+    def test_read_cache_invalidated_after_run_tests(self):
+        read1 = ToolCall(call_id='r1', name='READ_FILE', arguments={'path': 'a.txt'})
+        run = ToolCall(call_id='t1', name='RUN_TESTS', arguments={'target': 'tests/test_a.py'})
+        read2 = ToolCall(call_id='r2', name='READ_FILE', arguments={'path': 'a.txt'})
+        adapter = FakeAdapter([response(calls=(read1,)), response(calls=(run,)),
+                               response(calls=(read2,)), response('done')])
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model,
+                                    ('READ_FILE', 'RUN_TESTS'))
+        result = loop.run('test then reread', Event())
+        self.assertEqual(result.status, 'DONE')
+        self.assertEqual([call[1] for call in self.broker.calls], ['READ_FILE', 'RUN_TESTS', 'READ_FILE'])
+
+    def test_repeated_write_file_is_never_cached(self):
+        write1 = ToolCall(call_id='w1', name='WRITE_FILE', arguments={'path': 'a.txt', 'content': 'same'})
+        write2 = ToolCall(call_id='w2', name='WRITE_FILE', arguments={'path': 'a.txt', 'content': 'same'})
+        adapter = FakeAdapter([response(calls=(write1,)), response(calls=(write2,)), response('done')])
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model, ('WRITE_FILE',))
+        result = loop.run('write twice', Event())
+        self.assertEqual(result.status, 'DONE')
+        self.assertEqual(len(self.broker.calls), 2)
+
+    def test_third_identical_read_request_returns_agent_stuck(self):
+        calls = [ToolCall(call_id=f'l{i}', name='LIST_FILES', arguments={'path': '.'})
+                 for i in range(1, 4)]
+        adapter = FakeAdapter([*(response(calls=(call,)) for call in calls)])
+        events = []
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model, ('LIST_FILES',),
+                                    emit=lambda name, **data: events.append((name, data)))
+        result = loop.run('list repeatedly', Event())
+        self.assertEqual(result.status, 'AGENT_STUCK')
+        self.assertEqual(result.model_calls, 3)
+        self.assertEqual(len(self.broker.calls), 1)
+        tool_events = [data for name, data in events if name == 'tool.completed']
+        self.assertEqual([event['call_id'] for event in tool_events], ['l1', 'l2', 'l3'])
+
+    def test_normal_inspect_fail_edit_pass_final_flow_and_call_ids(self):
+        self.broker.run_test_outcomes = [False, True]
+        calls = [
+            ToolCall(call_id='c1', name='LIST_FILES', arguments={'path': '.'}),
+            ToolCall(call_id='c2', name='READ_FILE', arguments={'path': 'calculator.py'}),
+            ToolCall(call_id='c3', name='RUN_TESTS', arguments={'target': 'tests/test_calculator.py'}),
+            ToolCall(call_id='c4', name='WRITE_FILE', arguments={'path': 'calculator.py', 'content': 'fixed'}),
+            ToolCall(call_id='c5', name='RUN_TESTS', arguments={'target': 'tests/test_calculator.py'}),
+        ]
+        adapter = FakeAdapter([*(response(calls=(call,)) for call in calls), response('tests pass')])
+        events = []
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model,
+            ('LIST_FILES', 'READ_FILE', 'RUN_TESTS', 'WRITE_FILE'),
+            emit=lambda name, **data: events.append((name, data)))
+        result = loop.run('inspect, test, edit, retest', Event())
+        self.assertEqual((result.status, result.summary), ('DONE', 'tests pass'))
+        self.assertEqual([call[1] for call in self.broker.calls],
+                         ['LIST_FILES', 'READ_FILE', 'RUN_TESTS', 'WRITE_FILE', 'RUN_TESTS'])
+        tool_events = [data for name, data in events if name == 'tool.completed']
+        self.assertEqual([event['call_id'] for event in tool_events], ['c1', 'c2', 'c3', 'c4', 'c5'])
+        self.assertEqual([event['tests_passed'] for event in tool_events if 'tests_passed' in event],
+                         [False, True])
+        self.assertNotIn('private test output', json.dumps(tool_events))
+        self.assertNotIn('read result', json.dumps(tool_events))
+
+    def test_tool_trace_redacts_write_content_and_summarizes_results(self):
+        secret = 'do-not-log-this-source'
+        write = ToolCall(call_id='write-secret', name='WRITE_FILE',
+                         arguments={'path': 'a.txt', 'content': secret})
+        adapter = FakeAdapter([response(calls=(write,)), response('done')])
+        events = []
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model, ('WRITE_FILE',),
+                                    emit=lambda name, **data: events.append((name, data)))
+        self.assertEqual(loop.run('write', Event()).status, 'DONE')
+        event = next(data for name, data in events if name == 'tool.completed')
+        self.assertEqual(event['call_id'], 'write-secret')
+        normalized = json.loads(event['normalized_arguments'])
+        self.assertNotIn('content', normalized)
+        self.assertEqual(normalized['content_sha256'], hashlib.sha256(secret.encode()).hexdigest())
+        self.assertEqual(normalized['content_bytes'], len(secret.encode()))
+        self.assertNotIn(secret, json.dumps(event))
+        self.assertTrue(event['result_digest'])
 
 
 if __name__ == '__main__':

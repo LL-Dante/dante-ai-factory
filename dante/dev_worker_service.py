@@ -59,6 +59,10 @@ class DevelopmentLimitReached(InferenceError):
     failure_code = 'LIMIT_REACHED'
 
 
+class DevelopmentAgentStuck(InferenceError):
+    failure_code = 'AGENT_STUCK'
+
+
 class _CodingAgent:
     def __init__(self, *, adapter, broker, ledger, model, workspace: Path, tool_ids):
         self.adapter, self.broker, self.ledger = adapter, broker, ledger
@@ -83,6 +87,9 @@ class _CodingAgent:
             if result.status == 'CANCELLED':
                 self.ledger.transition(task.task_id, TaskStatus.CANCELLED)
                 raise InferenceCancelled('Development job cancelled')
+            if result.status == 'AGENT_STUCK':
+                self.ledger.transition(task.task_id, TaskStatus.FAILED_TERMINAL)
+                raise DevelopmentAgentStuck('Development agent repeated an unchanged read-only request')
             if result.status != 'DONE':
                 self.ledger.transition(task.task_id, TaskStatus.FAILED_TERMINAL)
                 raise DevelopmentLimitReached('Development agent reached a bounded limit')
@@ -163,7 +170,7 @@ class DevelopmentWorkerService:
             name='Dante Local Coding Worker', role='Bounded local workspace coding',
             instructions=('Use only the registered workspace tools. Never request shell, network, '
                           'secrets, arbitrary commands, or changed permissions. RUN_TESTS only '
-                          'accepts one tests/test_*.py target and is not an OS security sandbox.'),
+                          'accepts one workspace-relative project tests/test_*.py target and is not an OS security sandbox.'),
             capabilities=('LOCAL_INFERENCE',), model_target=target,
             output_token_budget=384, timeout_s=600,
             retry_policy=AgentRetryPolicy(maximum_attempts=1), version='1.0.0')

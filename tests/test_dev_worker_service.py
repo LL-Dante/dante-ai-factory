@@ -11,7 +11,8 @@ from dante.contracts.agents import AgentTaskPayload
 from dante.contracts.inference import AssistantMessage, ToolCall, Usage
 from dante.contracts.runtime import LocalModelMetadata
 from dante.dev_qwen_runtime import DevelopmentQwenAdapter
-from dante.dev_worker_service import DevelopmentWorkerService, _CodingAgent, discover_development_qwen
+from dante.dev_worker_service import (DevelopmentAgentStuck, DevelopmentWorkerService,
+                                      _CodingAgent, discover_development_qwen)
 from dante.dev_worker_tools import register_coding_tools
 from dante.ledger import TaskLedger
 from dante.tool_broker import ToolBroker
@@ -66,6 +67,42 @@ class DevelopmentWorkerServiceTests(unittest.TestCase):
             self.assertEqual(result.metadata['tool_calls'], 1)
             self.assertEqual(ledger.get_task(task.task_id).status, TaskStatus.COMPLETED)
             self.assertIn('tool.completed', [name for name, _meta in emitted])
+
+    def test_coding_agent_exposes_agent_stuck_failure_code(self):
+        class FakeAdapter:
+            def __init__(self, replies):
+                self.replies = iter(replies)
+
+            def complete_cancellable(self, _request, _cancellation):
+                return next(self.replies)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / 'workspace'
+            workspace.mkdir()
+            (workspace / 'a.txt').write_text('alpha', encoding='utf-8')
+            model = dev_model()
+            ledger = TaskLedger(root / 'dante.db')
+            broker = ToolBroker(ledger=ledger)
+            tools = register_coding_tools(broker, str(workspace))
+            replies = []
+            for index in range(3):
+                call = ToolCall(call_id=f'read-{index}', name='READ_FILE',
+                                arguments={'path': 'a.txt'})
+                replies.append(SimpleNamespace(assistant_message=AssistantMessage(tool_calls=(call,)),
+                    content='', tool_calls=(call,), finish_reason='tool_calls',
+                    usage=Usage(input_tokens=1, output_tokens=1)))
+            agent = _CodingAgent(adapter=FakeAdapter(replies), broker=broker, ledger=ledger,
+                model=model, workspace=workspace.resolve(), tool_ids=tools)
+            task = Task(task_id='job_' + 'b' * 32, goal='read repeatedly', workspace=str(workspace.resolve()))
+            payload = AgentTaskPayload(agent_id='local-coding-worker', objective='read repeatedly',
+                requested_output_tokens=384, definition_version='1.0.0', definition_digest='b' * 64)
+            spec = SimpleNamespace(metadata={'workspace': str(workspace.resolve())})
+            with self.assertRaises(DevelopmentAgentStuck) as caught:
+                agent.execute(None, SimpleNamespace(job_id=task.task_id), None, payload, spec,
+                              Event(), lambda *_args, **_kwargs: None)
+            self.assertEqual(caught.exception.failure_code, 'AGENT_STUCK')
+            self.assertEqual(ledger.get_task(task.task_id).status, TaskStatus.FAILED_TERMINAL)
 
     def test_readonly_model_discovery_marks_qualification_unknown(self):
         digest = 'a' * 64

@@ -22,9 +22,9 @@ _TEST_FILE = re.compile(r'test_[A-Za-z0-9_]+\.py\Z')
 
 
 def _run_tests(root: Path, target: str) -> dict:
-    _validate_target(root, target)
+    candidate = _validate_target(root, target)
     normalized = target.replace('\\', '/')
-    parts = normalized.split('/')
+    project_root = candidate.parent.parent
 
     env = {'PATH': os.environ.get('PATH', ''), 'SYSTEMROOT': os.environ.get('SYSTEMROOT', ''),
            'WINDIR': os.environ.get('WINDIR', ''), 'TEMP': os.environ.get('TEMP', ''),
@@ -32,9 +32,9 @@ def _run_tests(root: Path, target: str) -> dict:
            'PYTHONDONTWRITEBYTECODE': '1'}
     creationflags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
     started = time.monotonic()
-    module_path = (root / 'tests' / parts[1]).as_posix()
+    module_path = candidate.as_posix()
     bootstrap = (
-        'import importlib.util,sys,unittest; sys.path.insert(0, ' + repr(str(root)) + '); '
+        'import importlib.util,sys,unittest; sys.path.insert(0, ' + repr(str(project_root)) + '); '
         'spec=importlib.util.spec_from_file_location("_dante_selected_test", ' + repr(module_path) + '); '
         'module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); '
         'suite=unittest.defaultTestLoader.loadTestsFromModule(module); '
@@ -43,7 +43,7 @@ def _run_tests(root: Path, target: str) -> dict:
     )
     process = subprocess.Popen(
         [sys.executable, '-I', '-c', bootstrap],
-        cwd=root, env=env, stdin=subprocess.DEVNULL,
+        cwd=project_root, env=env, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
         creationflags=creationflags,
     )
@@ -109,14 +109,19 @@ def _validate_target(root: Path, target: str) -> Path:
         raise ValueError('Target must be a relative tests/test_*.py path')
     normalized = target.replace('\\', '/')
     parts = normalized.split('/')
-    if len(parts) != 2 or parts[0] != 'tests' or not _TEST_FILE.fullmatch(parts[1]):
-        raise ValueError('Only one tests/test_*.py file may run')
+    if (len(parts) < 2 or len(parts) > 8 or any(part in {'', '.', '..'} for part in parts)
+            or parts[-2] != 'tests' or not _TEST_FILE.fullmatch(parts[-1])):
+        raise ValueError('Only one workspace-relative project tests/test_*.py file may run')
     candidate = contained_path(root, normalized)
-    tests_dir = root / 'tests'
-    if (candidate.parent != tests_dir or candidate.is_symlink()
+    project_root = candidate.parent.parent
+    try:
+        project_root.relative_to(root.resolve())
+    except ValueError:
+        raise ValueError('Test project is outside the workspace') from None
+    if (not project_root.is_dir() or candidate.parent.name != 'tests' or candidate.is_symlink()
             or (hasattr(candidate, 'is_junction') and candidate.is_junction())
             or not candidate.is_file()):
-        raise ValueError('Test target is not a regular file in workspace tests/')
+        raise ValueError('Test target is not a regular file under project tests/')
     return candidate
 
 

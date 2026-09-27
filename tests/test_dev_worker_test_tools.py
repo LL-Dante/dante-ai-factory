@@ -43,6 +43,20 @@ class DevelopmentTestToolTests(unittest.TestCase):
         self.assertFalse(result.data['tests_passed'])
         self.assertIn('AssertionError', result.data['output'])
 
+    def test_runs_one_nested_project_test_from_that_project_root(self):
+        project = self.root / 'disposable-project'
+        (project / 'tests').mkdir(parents=True)
+        (self.root / 'calculator.py').write_text('def add(a, b): return a - b\n', encoding='utf-8')
+        (project / 'calculator.py').write_text('def add(a, b): return a + b\n', encoding='utf-8')
+        (project / 'tests' / 'test_calculator.py').write_text(
+            'import unittest\nfrom calculator import add\n'
+            'class T(unittest.TestCase):\n def test_add(self): self.assertEqual(add(2,3),5)\n',
+            encoding='utf-8')
+        result = self.broker._run(self.task, 'RUN_TESTS',
+                                  {'target': 'disposable-project/tests/test_calculator.py'})
+        self.assertEqual(result.status, ToolStatus.SUCCESS)
+        self.assertTrue(result.data['tests_passed'], result.data['output'])
+
     def test_preflight_allows_only_the_zero_permission_test_capability(self):
         (self.root / 'tests' / 'test_math.py').write_text('import unittest\n', encoding='utf-8')
         self.assertIsNone(self.broker.preflight(self.task, 'RUN_TESTS',
@@ -52,7 +66,8 @@ class DevelopmentTestToolTests(unittest.TestCase):
         for target in ('../outside.py', 'C:\\temp\\test_x.py', 'tests/test_x.py/../x.py'):
             result = self.broker.preflight(self.task, 'RUN_TESTS', {'target': target})
             self.assertIn(result.status, {ToolStatus.POLICY_DENIED, ToolStatus.VALIDATION_DENIED})
-        for target in ('tests/evil.py', 'tests/test_x.py --help'):
+        for target in ('tests/evil.py', 'tests/test_x.py --help', 'other/test_x.py',
+                       'project/tests/test-x.py'):
             result = self.broker._run(self.task, 'RUN_TESTS', {'target': target})
             self.assertEqual(result.status, ToolStatus.EXECUTION_FAILURE)
 

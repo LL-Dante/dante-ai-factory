@@ -64,16 +64,22 @@ def _list_files(root: Path, path: str) -> dict:
                 or _sensitive(Path(child.name))):
             continue
         name = child.name
-        size = len(name.encode("utf-8"))
+        if child.is_dir():
+            entry_type = 'directory'
+        elif child.is_file():
+            entry_type = 'file'
+        else:
+            entry_type = 'other'
+        size = len(name.encode("utf-8")) + len(entry_type) + 12
         if byte_count + size > 24000:
             truncated = True
             break
-        entries.append(name)
+        entries.append({'name': name, 'type': entry_type})
         byte_count += size
         if len(entries) >= 100:
             truncated = True
             break
-    entries.sort()
+    entries.sort(key=lambda entry: entry['name'])
     return {"ok": True, "path": path, "entries": entries, "truncated": truncated}
 
 

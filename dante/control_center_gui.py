@@ -17,6 +17,9 @@ from tkinter import messagebox, ttk
 
 from dante.hardware_inventory import collect_snapshot
 from dante.node0_control import ControlError, Node0ControlClient
+from dante.config import load_config
+from dante.dev_qwen_runtime import DevelopmentQwenAdapter
+from dante.dev_worker_service import DevelopmentWorkerService, discover_development_qwen
 
 
 LOG = logging.getLogger("dante.control_center_gui")
@@ -355,6 +358,27 @@ def job_details_text(job, events=()):
     return "\n".join(lines)
 
 
+def development_job_metrics(events):
+    """Summarize only measured development-worker event fields."""
+    rows = [event for event in events if isinstance(event, dict)]
+    model_events = [event for event in rows if event.get("event") == "model.completed"]
+    tool_events = [event for event in rows if event.get("event") == "tool.completed"]
+
+    def total(key):
+        values = [(event.get("metadata") or {}).get(key) for event in model_events]
+        if not values or any(type(value) is not int or value < 0 for value in values):
+            return "Unknown (not reported)"
+        return str(sum(values))
+
+    return {
+        "model_calls": str(len(model_events)),
+        "tool_calls": str(len(tool_events)),
+        "input_tokens": total("input_tokens"),
+        "output_tokens": total("output_tokens"),
+        "current_operation": rows[-1].get("event", "Unknown (not reported)") if rows else "Unknown (not reported)",
+    }
+
+
 class ControlCenterApp:
     POLL_SECONDS = 3
 
@@ -373,6 +397,11 @@ class ControlCenterApp:
         self.events = []
         self.ollama = {"online": False, "endpoint": OLLAMA_ENDPOINT, "installed": [], "resident": [], "errors": []}
         self._busy = False
+        self._dev_worker = None
+        self._dev_worker_lock = threading.Lock()
+        self._active_dev_job_id = None
+        self._active_dev_started = None
+        self._dev_poll_after_id = None
         self._build()
         self.refresh()
 
@@ -476,7 +505,8 @@ class ControlCenterApp:
         self.node_badge.configure(text=label, bg=color)
         self.updated.configure(text=datetime.now().astimezone().strftime("Updated %H:%M:%S") + (" · " + "; ".join(result["errors"]) if result["errors"] else ""))
         self.events = [f"{j.get('updated_at', '')}  {job_label(j)[0]}  {j.get('job_id', '')}" for j in self.jobs[:20]]
-        self.show_page(self.current_page)
+        if self.current_page != "Chat":
+            self.show_page(self.current_page)
         self.root.after(self.POLL_SECONDS * 1000, self.refresh)
 
     def show_page(self, name):
@@ -552,26 +582,187 @@ class ControlCenterApp:
         return tree
 
     def page_chat(self):
-        ttk.Label(self.page, text="Local agent chat", style="PanelTitle.TLabel").pack(anchor="w")
+        ttk.Label(self.page, text="Local Qwen worker · 11434", style="PanelTitle.TLabel").pack(anchor="w")
         form = ttk.Frame(self.page, style="Panel.TFrame", padding=14)
         form.pack(fill="x", pady=10)
-        ttk.Label(form, text="Registered local agent", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        agent_var = tk.StringVar(value=self.agents[0].get("agent_id", "") if self.agents else "")
-        ttk.Combobox(form, textvariable=agent_var, values=[a.get("agent_id", "") for a in self.agents], state="readonly", width=36).grid(row=0, column=1, sticky="w", padx=10)
+        ttk.Label(form, text="Model", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(form, text="LOCAL · dante-qwen-agent:latest · tests NOT RUN / BLOCKED", style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=10)
         ttk.Label(form, text="Objective", style="Muted.TLabel").grid(row=1, column=0, sticky="nw", pady=10)
         objective = tk.Text(form, height=5, bg="#11151d", fg="#e6eaf0", insertbackground="white", relief="flat", wrap="word")
         objective.grid(row=1, column=1, sticky="ew", padx=10, pady=10)
         form.columnconfigure(1, weight=1)
+        buttons = ttk.Frame(form)
+        buttons.grid(row=2, column=1, sticky="e")
+        submit_button = ttk.Button(buttons, text="Submit local job", command=self._submit_dev_job)
+        submit_button.pack(side="left", padx=(0, 8))
+        cancel_button = ttk.Button(buttons, text="Cancel", command=self._cancel_dev_job)
+        cancel_button.pack(side="left")
+        self._chat_objective = objective
+        self._chat_submit_button = submit_button
+        self._chat_cancel_button = cancel_button
         output = tk.Text(self.page, bg="#171d27", fg="#e6eaf0", relief="flat", wrap="word", state="disabled")
         output.pack(fill="both", expand=True)
-        ttk.Label(self.page, text="Jobs execute LOCAL_ONLY through Node 0. No cloud fallback is available.", style="Muted.TLabel").pack(anchor="w", pady=8)
-        def submit():
-            text = objective.get("1.0", "end").strip()
-            if not agent_var.get() or not text:
-                messagebox.showinfo("Chat", "Choose a local agent and enter an objective.")
-                return
-            self._action(lambda: self._request("agent_submit", agent_id=agent_var.get(), objective=text), "Job submitted", output)
-        ttk.Button(form, text="Submit local job", command=submit).grid(row=2, column=1, sticky="e")
+        self._chat_output = output
+        ttk.Label(self.page, text="Workspace: artifacts/worker-sandbox · approved tools only · no shell · tests NOT RUN / BLOCKED (no OS sandbox or RUN_TESTS tool)", style="Muted.TLabel").pack(anchor="w", pady=8)
+        active = bool(self._active_dev_job_id or getattr(self, "_dev_submit_pending", False))
+        submit_button.configure(state="disabled" if active else "normal")
+        cancel_button.configure(state="normal" if self._active_dev_job_id else "disabled")
+        self._render_dev_job(self._dev_last_display if hasattr(self, "_dev_last_display") else "Ready · Ollama 11434")
+        if self._active_dev_job_id:
+            self._schedule_dev_poll(0)
+
+    def _get_dev_worker(self):
+        if self._dev_worker is not None:
+            return self._dev_worker
+        with self._dev_worker_lock:
+            if self._dev_worker is None:
+                project_root = Path(__file__).resolve().parents[1]
+                sandbox_parent = project_root / "artifacts"
+                sandbox = sandbox_parent / "worker-sandbox"
+                for path in (project_root, sandbox_parent, sandbox):
+                    if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+                        raise ValueError("Local worker workspace cannot contain a link or junction")
+                sandbox.mkdir(parents=True, exist_ok=True)
+                config = load_config(project_root / "config" / "dante" / "base.yaml",
+                                     overrides={"workspace": str(sandbox)})
+                adapter = DevelopmentQwenAdapter()
+                model = discover_development_qwen(adapter)
+                db_path = project_root / config.database_path
+                self._dev_worker = DevelopmentWorkerService(db_path, adapter, model, sandbox)
+        return self._dev_worker
+
+    def _render_dev_job(self, text):
+        self._dev_last_display = text
+        widget = getattr(self, "_chat_output", None)
+        if widget is None or not widget.winfo_exists():
+            return
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+        widget.configure(state="disabled")
+
+    def _submit_dev_job(self):
+        if self._active_dev_job_id or getattr(self, "_dev_submit_pending", False):
+            return
+        text = self._chat_objective.get("1.0", "end").strip()
+        if not text:
+            messagebox.showinfo("Local Qwen", "Enter a bounded task.")
+            return
+        self._dev_submit_pending = True
+        self._chat_submit_button.configure(state="disabled")
+        self._chat_cancel_button.configure(state="disabled")
+        self._active_dev_started = time.monotonic()
+        self._render_dev_job("SUBMITTING · LOCAL 11434 · one job at a time\nTests: NOT RUN / BLOCKED")
+        threading.Thread(target=self._submit_dev_job_background, args=(text,), daemon=True).start()
+
+    def _submit_dev_job_background(self, objective):
+        try:
+            worker = self._get_dev_worker()
+            job = worker.submit(objective)
+            self.root.after(0, lambda: self._dev_job_submitted(job))
+        except Exception as exc:
+            message = f"SUBMIT ERROR · {type(exc).__name__}: {exc}"
+            self.root.after(0, lambda msg=message: self._dev_submit_failed(msg))
+
+    def _dev_job_submitted(self, job):
+        self._dev_submit_pending = False
+        self._active_dev_job_id = str(job.job_id)
+        self._set_dev_chat_buttons(submit="disabled", cancel="normal")
+        self._render_dev_job(f"JOB: {job.job_id}\nSTATE: {job.state.value}\nQUEUE POSITION: {self._unknown()}\nTESTS: NOT RUN / BLOCKED")
+        self._schedule_dev_poll(0)
+
+    def _dev_submit_failed(self, message):
+        self._dev_submit_pending = False
+        self._active_dev_started = None
+        self._set_dev_chat_buttons(submit="normal", cancel="disabled")
+        self._render_dev_job(message)
+
+    def _set_dev_chat_buttons(self, *, submit, cancel):
+        for name, state in (("_chat_submit_button", submit), ("_chat_cancel_button", cancel)):
+            widget = getattr(self, name, None)
+            if widget is not None and widget.winfo_exists():
+                widget.configure(state=state)
+
+    @staticmethod
+    def _unknown():
+        return "Unknown (not reported)"
+
+    def _schedule_dev_poll(self, delay_ms=1500):
+        if self._active_dev_job_id and self._dev_poll_after_id is None:
+            self._dev_poll_after_id = self.root.after(delay_ms, self._poll_dev_job)
+
+    def _poll_dev_job(self):
+        self._dev_poll_after_id = None
+        job_id = self._active_dev_job_id
+        if not job_id:
+            return
+        threading.Thread(target=self._poll_dev_job_background, args=(job_id,), daemon=True).start()
+
+    def _poll_dev_job_background(self, job_id):
+        try:
+            worker = self._get_dev_worker()
+            job = worker.get(job_id)
+            events = worker.events(job_id)
+            position = worker.queue_position(job_id)
+            elapsed = time.monotonic() - self._active_dev_started if self._active_dev_started else None
+            metrics = development_job_metrics(events)
+            lines = [f"JOB: {job_id}", f"STATE: {job.state.value.upper()}",
+                     f"QUEUE POSITION: {position if position is not None else self._unknown()}",
+                     f"ELAPSED: {elapsed:.1f}s" if elapsed is not None else f"ELAPSED: {self._unknown()}",
+                     f"CURRENT OPERATION: {metrics['current_operation']}",
+                     f"MODEL CALLS: {metrics['model_calls']} · TOOL CALLS: {metrics['tool_calls']}",
+                     f"INPUT TOKENS (SUM ACROSS CALLS): {metrics['input_tokens']}",
+                     f"OUTPUT TOKENS (SUM ACROSS CALLS): {metrics['output_tokens']}",
+                     "MODEL: dante-qwen-agent:latest · http://127.0.0.1:11434",
+                     "TTFT / cached tokens / output tokens per second: Unknown (not reported)",
+                     "TESTS: NOT RUN / BLOCKED (no OS sandbox or RUN_TESTS tool)", "", "TIMELINE"]
+            for event in events[-40:]:
+                name = event.get("event", self._unknown())
+                metadata = event.get("metadata") or {}
+                detail = ""
+                if name == "tool.completed":
+                    detail = f"  {metadata.get('tool_id', self._unknown())} · {metadata.get('status', self._unknown())}"
+                elif name == "model.completed":
+                    detail = (f"  call {metadata.get('model_calls', self._unknown())} · "
+                              f"in {metadata.get('input_tokens', self._unknown())} · "
+                              f"out {metadata.get('output_tokens', self._unknown())}")
+                lines.append(f"{event.get('timestamp_utc', self._unknown())}  {name}{detail}")
+            terminal = job.state.value in {"succeeded", "failed", "cancelled", "timed_out"}
+            if job.result is not None:
+                lines.extend(["", "RESULT", json.dumps(job.result, ensure_ascii=False, indent=2, default=str)])
+            if job.failure is not None:
+                lines.extend(["", "FAILURE", json.dumps(job.failure, ensure_ascii=False, indent=2, default=str)])
+            self.root.after(0, lambda: self._dev_job_updated(job_id, "\n".join(lines), terminal))
+        except Exception as exc:
+            message = f"JOB: {job_id}\nPOLL ERROR: {type(exc).__name__}: {exc}\nPolling will retry."
+            self.root.after(0, lambda msg=message: self._dev_job_updated(job_id, msg, False))
+
+    def _dev_job_updated(self, job_id, text, terminal):
+        if self._active_dev_job_id != job_id:
+            return
+        self._render_dev_job(text)
+        if terminal:
+            self._active_dev_job_id = None
+            self._active_dev_started = None
+            self._set_dev_chat_buttons(submit="normal", cancel="disabled")
+        else:
+            self._schedule_dev_poll()
+
+    def _cancel_dev_job(self):
+        job_id = self._active_dev_job_id
+        if not job_id:
+            return
+        self._set_dev_chat_buttons(submit="disabled", cancel="disabled")
+        self._render_dev_job(f"JOB: {job_id}\nCANCEL REQUESTED\nTests: NOT RUN / BLOCKED")
+        def cancel_background():
+            try:
+                job = self._get_dev_worker().cancel(job_id)
+                message = f"JOB: {job_id}\nCANCEL REQUEST STATE: {job.state.value}"
+            except Exception as exc:
+                message = f"JOB: {job_id}\nCANCEL ERROR: {type(exc).__name__}: {exc}"
+            self.root.after(0, lambda msg=message: self._render_dev_job(msg))
+            self.root.after(0, self._schedule_dev_poll)
+        threading.Thread(target=cancel_background, daemon=True).start()
 
     def page_agents(self):
         tree = self._tree(("name", "agent_id", "role", "model_target"), ("Name", "Agent ID", "Role", "Local model"))

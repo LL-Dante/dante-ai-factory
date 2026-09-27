@@ -790,9 +790,10 @@ class WorkloadOrchestrator:
                             return
                         retryable = isinstance(exc, (InferenceTimeout, Node0Unavailable)) or (
                             isinstance(exc, InferenceError) and getattr(exc, 'retry_after', None) is not None)
-                        code = 'result_too_large' if str(exc) == 'result_too_large' else (
+                        code = getattr(exc, 'failure_code', None) or (
+                            'result_too_large' if str(exc) == 'result_too_large' else (
                             type(exc).__name__ if isinstance(exc, (InferenceError, Node0Unavailable))
-                            else 'local_execution_failed')
+                            else 'local_execution_failed'))
                         failure = self.store.fail(job_id, attempt_id, code=code, retryable=retryable)
                         if spec.job_type == 'AGENT_TASK':
                             event = ('agent.execution.cancelled' if failure.state == JobState.CANCELLED

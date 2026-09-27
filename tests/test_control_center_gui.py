@@ -6,6 +6,7 @@ from dante.control_center_gui import (
     build_model_rows,
     build_ollama_status,
     display_fact,
+    development_job_metrics,
     format_bytes,
     format_count,
     elapsed_wall,
@@ -24,6 +25,20 @@ from dante.control_center_gui import (
 
 
 class ControlCenterGuiPresentationTests(unittest.TestCase):
+    def test_development_worker_metrics_use_reported_event_values(self):
+        facts = development_job_metrics([
+            {"event": "model.completed", "metadata": {"input_tokens": 5, "output_tokens": 2}},
+            {"event": "tool.completed", "metadata": {"tool_id": "READ_FILE"}},
+            {"event": "model.completed", "metadata": {"input_tokens": 7, "output_tokens": 3}},
+        ])
+        self.assertEqual(facts, {"model_calls": "2", "tool_calls": "1", "input_tokens": "12",
+                                 "output_tokens": "5", "current_operation": "model.completed"})
+
+    def test_development_worker_missing_metrics_stay_unknown(self):
+        facts = development_job_metrics([{"event": "model.completed", "metadata": {"input_tokens": None}}])
+        self.assertEqual(facts["input_tokens"], "Unknown (not reported)")
+        self.assertEqual(facts["output_tokens"], "Unknown (not reported)")
+
     def test_opencode_settings_expose_only_numeric_local_limits(self):
         config = {
             "provider": {"ollama": {

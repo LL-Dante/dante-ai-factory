@@ -14,7 +14,7 @@ import time
 from pathlib import Path, PureWindowsPath
 
 from dante.contracts import ToolManifest
-from dante.tool_broker import ToolBroker, contained_path
+from dante.tool_broker import ToolBroker, WorkspaceMethod, contained_path
 
 _TIMEOUT_S = 120
 _OUTPUT_LIMIT = 32 * 1024
@@ -126,9 +126,11 @@ def register_test_tool(broker: ToolBroker, workspace: str) -> tuple[str, ...]:
     schema = {'type': 'object', 'properties': {'target': {'type': 'string'}},
               'required': ['target'], 'additionalProperties': False}
     broker.register(ToolManifest(
-        tool_id='RUN_TESTS', version='1', permissions=frozenset(),
-        risk='R1', filesystem_scope='none', network_scope='none', secret_access='none',
+        tool_id='RUN_TESTS', version='1', permissions=frozenset({'read_workspace'}),
+        risk='R1', filesystem_scope=str(root), network_scope='none', secret_access='none',
         approval_policy='never', timeout_s=_TIMEOUT_S + 20, output_limit_bytes=_OUTPUT_LIMIT + 4096,
-        arguments_schema=schema, path_permissions={}),
-        lambda target: _run_tests(root, target))
+        arguments_schema=schema, path_permissions={'target': 'read_workspace'}),
+        WorkspaceMethod(handler=lambda target: _run_tests(root, target), root=root,
+                        permission='read_workspace', schema=schema,
+                        paths={'target': 'read_workspace'}))
     return ('RUN_TESTS',)

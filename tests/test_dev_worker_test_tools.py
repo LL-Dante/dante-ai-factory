@@ -30,11 +30,18 @@ class DevelopmentTestToolTests(unittest.TestCase):
         self.assertIn('Ran 1 test', result.data['output'])
         self.assertIn('not an OS sandbox', result.data['isolation'])
 
+    def test_preflight_allows_only_the_zero_permission_test_capability(self):
+        (self.root / 'tests' / 'test_math.py').write_text('import unittest\n', encoding='utf-8')
+        self.assertIsNone(self.broker.preflight(self.task, 'RUN_TESTS',
+            {'target': 'tests/test_math.py'}))
+
     def test_rejects_arbitrary_paths_and_targets(self):
-        for target in ('../outside.py', 'C:\\temp\\test_x.py', 'tests/evil.py',
-                       'tests/test_x.py --help', 'tests/test_x.py/../x.py'):
+        for target in ('../outside.py', 'C:\\temp\\test_x.py', 'tests/test_x.py/../x.py'):
             result = self.broker.preflight(self.task, 'RUN_TESTS', {'target': target})
             self.assertIn(result.status, {ToolStatus.POLICY_DENIED, ToolStatus.VALIDATION_DENIED})
+        for target in ('tests/evil.py', 'tests/test_x.py --help'):
+            result = self.broker._run(self.task, 'RUN_TESTS', {'target': target})
+            self.assertEqual(result.status, ToolStatus.EXECUTION_FAILURE)
 
     def test_rejects_linked_test_target(self):
         source = self.root / 'outside.py'

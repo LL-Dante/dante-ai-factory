@@ -14,6 +14,7 @@ from dante.dev_agent_loop import DevelopmentAgentLoop
 from dante.dev_qwen_runtime import ENDPOINT, REF, DevelopmentQwenAdapter
 from dante.dev_worker_edit_tools import register_edit_tools
 from dante.dev_worker_tools import register_coding_tools
+from dante.dev_worker_test_tools import register_test_tool
 from dante.inference import InferenceCancelled, InferenceError, PolicyDenied
 from dante.ledger import TaskLedger
 from dante.tool_broker import ToolBroker
@@ -152,6 +153,7 @@ class DevelopmentWorkerService:
         self.broker = ToolBroker(ledger=self.ledger)
         tool_ids = register_coding_tools(self.broker, str(self.workspace_root))
         tool_ids += register_edit_tools(self.broker, str(self.workspace_root))
+        tool_ids += register_test_tool(self.broker, str(self.workspace_root))
         self.tool_ids = tuple(tool_ids)
 
         target = AgentModelTarget(model_id=model.model_id, runtime_reference=REF,
@@ -160,7 +162,8 @@ class DevelopmentWorkerService:
         self.definition = AgentDefinition(agent_id=self.AGENT_ID,
             name='Dante Local Coding Worker', role='Bounded local workspace coding',
             instructions=('Use only the registered workspace tools. Never request shell, network, '
-                          'secrets, tests, or changed permissions.'),
+                          'secrets, arbitrary commands, or changed permissions. RUN_TESTS only '
+                          'accepts one tests/test_*.py target and is not an OS security sandbox.'),
             capabilities=('LOCAL_INFERENCE',), model_target=target,
             output_token_budget=384, timeout_s=600,
             retry_policy=AgentRetryPolicy(maximum_attempts=1), version='1.0.0')

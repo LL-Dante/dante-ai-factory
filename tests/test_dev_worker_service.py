@@ -99,8 +99,7 @@ class DevelopmentWorkerServiceTests(unittest.TestCase):
             try:
                 self.assertEqual(service.store.path, service.ledger.path)
                 self.assertEqual(service.tool_ids,
-                    ('READ_FILE', 'LIST_FILES', 'SEARCH_TEXT', 'WRITE_FILE'))
-                self.assertNotIn('RUN_TESTS', service.tool_ids)
+                    ('READ_FILE', 'LIST_FILES', 'SEARCH_TEXT', 'WRITE_FILE', 'RUN_TESTS'))
                 self.assertEqual(service.orchestrator.resource_gate.max_gpu_jobs, 1)
                 self.assertEqual(service.orchestrator.state, 'STOPPED')
             finally:

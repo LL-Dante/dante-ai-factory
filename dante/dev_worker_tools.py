@@ -37,14 +37,36 @@ def _validate_path(root: Path, path: str) -> Path:
 
 
 def _read_file(root: Path, path: str) -> dict:
-    resolved = _validate_path(root, path)
+    try:
+        resolved = _validate_path(root, path)
+    except ValueError as exc:
+        if _sensitive(Path(path)):
+            return {"ok": True, "path": path, "content": None,
+                    "error": {"code": "blocked_path", "message": "This workspace path is not readable."}}
+        raise
+    # A readable tool response is still a successful tool operation when the
+    # requested file is absent or unsuitable.  Raising here makes the broker
+    # mark a harmless read as uncertain, which can strand the agent's required
+    # evidence step and prevent an otherwise valid completion.
+    def rejected(code: str, message: str) -> dict:
+        return {"ok": True, "path": path, "content": None,
+                "error": {"code": code, "message": message}}
+
+    if not resolved.exists():
+        return rejected("not_found", "No file exists at this workspace path.")
+    if resolved.is_dir():
+        return rejected("not_a_file", "The workspace path is a directory.")
     if not resolved.is_file() or resolved.is_symlink() or (hasattr(resolved, "is_junction") and resolved.is_junction()):
-        raise ValueError("not a regular nonlink file")
-    size = resolved.stat().st_size
-    if size > 24 * 1024:
-        raise ValueError("file exceeds 24KiB")
-    content = resolved.read_text(encoding="utf-8")
-    return {"ok": True, "path": path, "content": content}
+        return rejected("not_regular_file", "The workspace path is not a regular file.")
+    try:
+        if resolved.stat().st_size > 24 * 1024:
+            return rejected("too_large", "The file exceeds the 24 KiB read limit.")
+        content = resolved.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return rejected("invalid_encoding", "The file is not valid UTF-8 text.")
+    except OSError:
+        return rejected("read_failed", "The workspace file could not be read.")
+    return {"ok": True, "path": path, "content": content, "error": None}
 
 
 def _list_files(root: Path, path: str) -> dict:

@@ -265,6 +265,13 @@ class DevelopmentAgentLoopTests(unittest.TestCase):
         self.assertEqual(normalized['content_bytes'], len(secret.encode()))
         self.assertNotIn(secret, json.dumps(event))
         self.assertTrue(event['result_digest'])
+        model_event = next(data for name, data in events if name == 'model.completed')
+        self.assertEqual(model_event['tool_requested'], ['WRITE_FILE'])
+        summary = json.loads(model_event['tool_arguments_summary'])
+        self.assertNotIn(secret, json.dumps(summary))
+        self.assertEqual(summary[0]['arguments']['content_bytes'], len(secret.encode()))
+        self.assertIsNone(model_event['context_remaining_tokens'])
+        self.assertIn('tool_wall_s', event)
 
 
 if __name__ == '__main__':

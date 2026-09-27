@@ -46,17 +46,42 @@ class TestDevWorkerTools(unittest.TestCase):
     def test_traversal_denied(self):
         result = self.broker.preflight(self.task, 'READ_FILE', {'path': '../outside'})
         self.assertEqual(result.status, ToolStatus.POLICY_DENIED)
+        self.assertEqual(result.error_type, 'WorkspacePathDenied')
+
+    def test_missing_file_is_structured_success_not_uncertain_failure(self):
+        result = self.broker._run(self.task, 'READ_FILE', {'path': 'README.md'})
+        self.assertEqual(result.status, ToolStatus.SUCCESS)
+        self.assertEqual(result.data, {
+            'ok': True, 'path': 'README.md', 'content': None,
+            'error': {'code': 'not_found', 'message': 'No file exists at this workspace path.'},
+        })
+        self.assertFalse(result.effect_uncertain)
+
+    def test_directory_is_structured_read_error(self):
+        (self.root / 'folder').mkdir()
+        result = self.broker._run(self.task, 'READ_FILE', {'path': 'folder'})
+        self.assertEqual(result.status, ToolStatus.SUCCESS)
+        self.assertEqual(result.data['error']['code'], 'not_a_file')
+
+    def test_invalid_utf8_is_structured_read_error(self):
+        (self.root / 'binary.txt').write_bytes(b'\xff')
+        result = self.broker._run(self.task, 'READ_FILE', {'path': 'binary.txt'})
+        self.assertEqual(result.status, ToolStatus.SUCCESS)
+        self.assertEqual(result.data['error']['code'], 'invalid_encoding')
+        self.assertIsNone(result.data['content'])
 
     def test_sensitive_files_are_not_returned(self):
         (self.root / '.env').write_text('unique-secret-marker', encoding='utf-8')
         result = self.broker._run(self.task, 'LIST_FILES', {'path': '.'})
         self.assertNotIn('.env', [item['name'] for item in result.data['entries']])
         read = self.broker._run(self.task, 'READ_FILE', {'path': '.env'})
-        self.assertEqual(read.status, ToolStatus.EXECUTION_FAILURE)
+        self.assertEqual(read.status, ToolStatus.SUCCESS)
+        self.assertEqual(read.data['error']['code'], 'blocked_path')
 
     def test_absolute_path_denied(self):
         result = self.broker.preflight(self.task, 'READ_FILE', {'path': '/etc/passwd'})
         self.assertEqual(result.status, ToolStatus.POLICY_DENIED)
+        self.assertEqual(result.error_type, 'WorkspacePathDenied')
 
     def test_unknown_tool_denied(self):
         result = self.broker.preflight(self.task, 'RUN_TESTS', {})
@@ -66,8 +91,9 @@ class TestDevWorkerTools(unittest.TestCase):
         big = self.root / 'big.txt'
         big.write_text('x' * (24 * 1024 + 1))
         result = self.broker._run(self.task, 'READ_FILE', {'path': 'big.txt'})
-        self.assertEqual(result.status, ToolStatus.EXECUTION_FAILURE)
-        self.assertIsNone(result.data)
+        self.assertEqual(result.status, ToolStatus.SUCCESS)
+        self.assertEqual(result.data['error']['code'], 'too_large')
+        self.assertIsNone(result.data['content'])
 
 
 if __name__ == '__main__':

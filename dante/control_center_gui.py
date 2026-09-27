@@ -438,14 +438,126 @@ def development_test_status(events):
     return "RUN_TESTS executed · outcome not reported"
 
 
+def inspector_payload(kind, key, record=None, events=()):
+    """Build safe, factual drill-down content for the shared inspector."""
+    record = record if isinstance(record, dict) else {}
+    events = [event for event in events if isinstance(event, dict)]
+    metadata = [event.get("metadata") if isinstance(event.get("metadata"), dict) else {} for event in events]
+    if kind == "job":
+        metrics = development_job_metrics(events)
+        telemetry = record.get("telemetry") if isinstance(record.get("telemetry"), dict) else {}
+        job = record.get("job") if isinstance(record.get("job"), dict) else record
+        fields = [
+            ("Job ID", key), ("State", record.get("state") or job.get("state") or "Unknown (not reported)"),
+            ("Created / queued", (job.get("created_at") if isinstance(job, dict) else None) or telemetry.get("queued_at") or "Unknown (not reported)"),
+            ("Started", telemetry.get("slot_acquired_at") or "Unknown (not reported)"),
+            ("Ended", (job.get("updated_at") if isinstance(job, dict) else None) or telemetry.get("slot_released_at") or "Unknown (not reported)"),
+            ("Priority", telemetry.get("priority", job.get("priority", "Unknown (not reported)") if isinstance(job, dict) else "Unknown (not reported)")),
+            ("Queue position", telemetry.get("position", "Unknown (not reported)")),
+            ("Queue wait", f"{telemetry['queue_wait_ms']} ms" if isinstance(telemetry.get("queue_wait_ms"), int) else "Unknown (not reported)"),
+            ("Slot acquired", telemetry.get("slot_acquired_at") or "Unknown (not reported)"),
+            ("Slot released", telemetry.get("slot_released_at") or "Unknown (not reported)"),
+            ("Release reason", telemetry.get("slot_released_reason") or "Unknown (not reported)"),
+            ("Model", "dante-qwen-agent:latest" if events or record.get("job") else "Unknown (not reported)"),
+            ("Endpoint", OLLAMA_ENDPOINT if events or record.get("job") else "Unknown (not reported)"),
+            ("Model calls", metrics["model_calls"]), ("Tool calls", metrics["tool_calls"]),
+            ("Input tokens", metrics["input_tokens"]), ("Output tokens", metrics["output_tokens"]),
+            ("Tests", development_test_status(events)),
+            ("Current operation", metrics["current_operation"]),
+            ("Result", json.dumps(job.get("result"), ensure_ascii=False, default=str) if isinstance(job, dict) and job.get("result") is not None else "Unknown (not reported)"),
+            ("Failure", json.dumps(job.get("failure"), ensure_ascii=False, default=str) if isinstance(job, dict) and job.get("failure") is not None else "None reported"),
+        ]
+        return {"kind": kind, "key": key, "title": f"Job · {key}", "summary": str(fields[1][1]),
+                "fields": fields, "events": events[-40:], "related": [("Model", "model", "dante-qwen-agent:latest"),
+                    ("Runtime", "runtime", OLLAMA_ENDPOINT)]}
+    if kind in {"model_calls", "tool_calls", "tests", "failure", "queue", "model", "runtime", "agent", "hardware"}:
+        if kind == "model_calls":
+            selected = [(event, meta) for event, meta in zip(events, metadata) if event.get("event") == "model.completed"]
+            rows = []
+            for sequence, (event, meta) in enumerate(selected, 1):
+                rows.append((f"Call {sequence}", [
+                    ("Timestamp", event.get("timestamp_utc", "Unknown (not reported)")),
+                    ("Input tokens", meta.get("input_tokens", "Unknown (not reported)")),
+                    ("Cached input tokens", meta.get("cached_input_tokens", "Unknown (not reported)")),
+                    ("Output tokens", meta.get("output_tokens", "Unknown (not reported)")),
+                    ("Elapsed model time", meta.get("model_wall_s", "Unknown (not reported)")),
+                    ("TTFT", meta.get("ttft_s", "Unknown (not reported)")),
+                    ("Generation time", meta.get("generation_s", "Unknown (not reported)")),
+                    ("Output tokens/s", meta.get("output_tokens_per_second", "Unknown (not reported)")),
+                    ("Requested action", meta.get("tool_requested", "No tool requested")),
+                    ("Arguments summary", meta.get("tool_arguments_summary", "Unknown (not reported)")),
+                    ("Configured context tokens", meta.get("configured_context_tokens", "Unknown (not reported)")),
+                    ("Context remaining tokens", meta.get("context_remaining_tokens", "Unknown (not reported)")),
+                    ("State", event.get("event", "Unknown (not reported)")),
+                ]))
+            return {"kind": kind, "key": key, "title": f"Model calls · {key}", "summary": f"{len(rows)} calls",
+                    "fields": [(f"Call {n}", f"{len(f)} reported fields") for n, f in rows],
+                    "sections": rows, "events": [], "related": [("Model", "model", "dante-qwen-agent:latest")]}
+        if kind == "tool_calls":
+            selected = [(event, meta) for event, meta in zip(events, metadata) if event.get("event") == "tool.completed"]
+            rows = []
+            for sequence, (event, meta) in enumerate(selected, 1):
+                rows.append((f"Tool {sequence} · {meta.get('tool_id', 'Unknown')}", [
+                    ("Timestamp", event.get("timestamp_utc", "Unknown (not reported)")),
+                    ("Arguments", meta.get("normalized_arguments", "Unknown (not reported)")),
+                    ("Result summary", meta.get("result_summary", "Unknown (not reported)")),
+                    ("Duration", meta.get("elapsed_s", "Unknown (not reported)")),
+                    ("Tool duration", meta.get("tool_wall_s", "Unknown (not reported)")),
+                    ("Status", meta.get("status", "Unknown (not reported)")),
+                    ("Result digest", meta.get("result_digest", "Unknown (not reported)")),
+                    ("Error", meta.get("error_type", "None reported")),
+                ]))
+            return {"kind": kind, "key": key, "title": f"Tool calls · {key}", "summary": f"{len(rows)} calls",
+                    "fields": [(n, f"{len(f)} reported fields") for n, f in rows],
+                    "sections": rows, "events": [], "related": []}
+        telemetry = record.get("telemetry") if isinstance(record.get("telemetry"), dict) else {}
+        if kind == "queue":
+            fields = [(name, telemetry.get(source, "Unknown (not reported)")) for name, source in (
+                ("Queued at", "queued_at"), ("Queue position", "position"), ("Depth", "queue_depth"),
+                ("Priority", "priority"), ("Wait ms", "queue_wait_ms"), ("Capacity", "capacity"),
+                ("Slot owner", "slot_owner_job_id"), ("Slot acquired", "slot_acquired_at"),
+                ("Slot released", "slot_released_at"), ("Release reason", "slot_released_reason"))]
+        elif kind == "model":
+            fields = [("Model", key), ("Runtime reference", key), ("Configured context", record.get("context", "Unknown (not reported)")),
+                      ("Parameter count", record.get("parameters", "Unknown (not reported)")),
+                      ("Quantization", record.get("quantization", "Unknown (not reported)"))]
+        elif kind == "runtime":
+            fields = [("Endpoint", key), ("Runtime state", record.get("state", "Unknown (not reported)")),
+                      ("Slot owner", telemetry.get("slot_owner_job_id", "Unknown (not reported)")),
+                      ("Queue depth", telemetry.get("queue_depth", "Unknown (not reported)"))]
+        elif kind == "agent":
+            fields = [("Agent", key), ("State", record.get("state", "Unknown (not reported)")),
+                      ("Current job", record.get("job_id", "Unknown (not reported)")),
+                      ("Model", record.get("model", "Unknown (not reported)"))]
+        elif kind == "hardware":
+            fields = [("Metric", key), ("Value", record.get("value", "Unknown (not reported)")),
+                      ("Source", record.get("source", "Unknown (not reported)")),
+                      ("Observed at", record.get("observed_at", "Unknown (not reported)"))]
+        elif kind == "tests":
+            selected = [(event, meta) for event, meta in zip(events, metadata) if event.get("event") == "tool.completed" and meta.get("tool_id") == "RUN_TESTS"]
+            fields = [(f"Test run {n}", meta.get("result_summary", "Unknown (not reported)")) for n, (_event, meta) in enumerate(selected, 1)] or [("Tests", development_test_status(events))]
+        else:
+            selected = [(event, meta) for event, meta in zip(events, metadata)
+                        if meta.get("status") not in {None, "success"} or meta.get("error_type")]
+            fields = [("Fact", "Failure data shown from persisted events only"),
+                      ("Error events", len(selected)),
+                      ("Diagnosis", "Known: workspace read errors now return structured results; no inference diagnosis generated.")]
+        timeline = events[-40:] if kind in {"queue", "failure", "tests"} else []
+        return {"kind": kind, "key": key, "title": f"{kind.replace('_', ' ').title()} · {key}",
+                "summary": f"{len(fields)} factual details", "fields": fields,
+                "events": timeline, "related": []}
+    return {"kind": kind, "key": key, "title": str(kind).title(), "summary": "Unknown (not reported)",
+            "fields": [("Value", str(key))], "events": [], "related": []}
+
+
 class ControlCenterApp:
     POLL_SECONDS = 3
 
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Dante AI Factory · Control Center")
-        self.root.geometry("1240x820")
-        self.root.minsize(980, 680)
+        self.root.geometry("1440x900")
+        self.root.minsize(1160, 740)
         self.root.configure(bg="#11151d")
         self.client_factory = Node0ControlClient
         self.snapshot = None
@@ -464,6 +576,7 @@ class ControlCenterApp:
         self._dev_poll_inflight = set()
         self._dev_submit_pending = 0
         self._dev_poll_after_id = None
+        self._inspector_object = None
         self._build()
         self.refresh()
 
@@ -477,6 +590,8 @@ class ControlCenterApp:
         style.configure("Title.TLabel", font=("Segoe UI Semibold", 21), foreground="#f4f6f9")
         style.configure("Metric.TLabel", font=("Segoe UI Semibold", 16), foreground="#ffffff", background="#1a202b")
         style.configure("PanelTitle.TLabel", font=("Segoe UI Semibold", 11), foreground="#aab6c8", background="#1a202b")
+        style.configure("Inspect.TLabel", foreground="#9fc5ff", cursor="hand2")
+        style.map("Inspect.TLabel", foreground=[("active", "#ffffff")])
         style.configure("TButton", padding=(12, 8), background="#263143", foreground="#eef2f7")
         style.map("TButton", background=[("active", "#35435a")])
         style.configure("Treeview", background="#171d27", fieldbackground="#171d27", foreground="#e6eaf0", rowheight=30)
@@ -503,6 +618,25 @@ class ControlCenterApp:
 
         self.content = ttk.Frame(body)
         self.content.pack(side="left", fill="both", expand=True)
+        self.inspector = ttk.Frame(body, style="Panel.TFrame", padding=12, width=360)
+        self.inspector.pack(side="right", fill="y", padx=(12, 0))
+        self.inspector.pack_propagate(False)
+        self.inspector_title = ttk.Label(self.inspector, text="INSPECTOR", style="PanelTitle.TLabel", wraplength=330)
+        self.inspector_title.pack(anchor="w")
+        toolbar = ttk.Frame(self.inspector, style="Panel.TFrame")
+        toolbar.pack(fill="x", pady=(8, 8))
+        ttk.Button(toolbar, text="Copy details", command=self._copy_inspector).pack(side="left")
+        ttk.Button(toolbar, text="Refresh", command=self._refresh_inspector).pack(side="left", padx=6)
+        canvas = tk.Canvas(self.inspector, background="#1a202b", highlightthickness=0, width=336)
+        inspector_scroll = ttk.Scrollbar(self.inspector, orient="vertical", command=canvas.yview)
+        self.inspector_body = ttk.Frame(canvas, style="Panel.TFrame")
+        self.inspector_body.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.inspector_body, anchor="nw", width=320)
+        canvas.configure(yscrollcommand=inspector_scroll.set)
+        inspector_scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self._inspector_object = None
+        self._inspector_text = "Select an inspectable value to view its evidence."
         self.page_title = ttk.Label(self.content, text="Dashboard", style="Title.TLabel")
         self.page_title.pack(anchor="w", pady=(0, 14))
         self.page = ttk.Frame(self.content)
@@ -577,6 +711,63 @@ class ControlCenterApp:
         for child in self.page.winfo_children():
             child.destroy()
         getattr(self, f"page_{name.lower()}")()
+
+    def _inspectable(self, parent, label, value, kind, key=None, record=None, events=()):
+        text = f"{label}: {value}  ›"
+        widget = ttk.Label(parent, text=text, style="Inspect.TLabel", wraplength=580)
+        widget.pack(anchor="w", pady=2)
+        payload = inspector_payload(kind, key if key is not None else value, record, events)
+        widget.bind("<Button-1>", lambda _event, detail=payload: self._show_inspector(detail))
+        return widget
+
+    def _show_inspector(self, payload):
+        self._inspector_object = payload
+        for child in self.inspector_body.winfo_children():
+            child.destroy()
+        self.inspector_title.configure(text=payload["title"].upper())
+        ttk.Label(self.inspector_body, text=payload.get("summary", "Unknown (not reported)"),
+                  style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(0, 8))
+        sections = payload.get("sections")
+        if sections:
+            for title, fields in sections:
+                ttk.Label(self.inspector_body, text=title, style="PanelTitle.TLabel").pack(anchor="w", pady=(6, 2))
+                for name, value in fields:
+                    ttk.Label(self.inspector_body, text=f"{name}: {value}", style="Muted.TLabel",
+                              wraplength=330, justify="left").pack(anchor="w", pady=1)
+        else:
+            for name, value in payload.get("fields", []):
+                ttk.Label(self.inspector_body, text=f"{name}: {value}", style="Muted.TLabel",
+                          wraplength=330, justify="left").pack(anchor="w", pady=2)
+        related = payload.get("related", [])
+        if related:
+            ttk.Label(self.inspector_body, text="RELATED", style="PanelTitle.TLabel").pack(anchor="w", pady=(10, 3))
+            for label, kind, key in related:
+                ttk.Button(self.inspector_body, text=f"Inspect {label}: {key}",
+                           command=lambda k=kind, v=key: self._show_inspector(inspector_payload(k, v))).pack(anchor="w", pady=2)
+        timeline = payload.get("events", [])
+        if timeline:
+            ttk.Label(self.inspector_body, text="EVENT EVIDENCE", style="PanelTitle.TLabel").pack(anchor="w", pady=(10, 3))
+            for event in timeline:
+                ttk.Label(self.inspector_body,
+                          text=f"{event.get('timestamp_utc', 'Unknown')} · {event.get('event', 'Unknown')} · {json.dumps(event.get('metadata') or {}, ensure_ascii=False, default=str)}",
+                          style="Muted.TLabel", wraplength=330, justify="left").pack(anchor="w", pady=2)
+
+    def _copy_inspector(self):
+        if self._inspector_object is None:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(json.dumps(self._inspector_object, ensure_ascii=False, indent=2, default=str))
+
+    def _refresh_inspector(self):
+        payload = self._inspector_object
+        if payload is None:
+            self.refresh()
+        elif payload.get("kind") == "job" and payload.get("key") in self._dev_jobs:
+            job_id = payload["key"]
+            self._dev_jobs[job_id]["details_loaded"] = False
+            self._poll_dev_job()
+        else:
+            self.refresh()
 
     def _panel(self, parent, title, value, detail=""):
         frame = ttk.Frame(parent, style="Panel.TFrame", padding=14)
@@ -674,6 +865,10 @@ class ControlCenterApp:
         output = tk.Text(self.page, bg="#171d27", fg="#e6eaf0", relief="flat", wrap="word", state="disabled")
         output.pack(fill="both", expand=True)
         self._chat_output = output
+        actions = ttk.Frame(self.page)
+        actions.pack(fill="x", pady=(4, 0))
+        self._chat_inspect_actions = []
+        self._chat_inspect_bar = actions
         ttk.Label(self.page, text="Workspace: artifacts/worker-sandbox · approved tools only · no shell · bounded RUN_TESTS · current-user permissions · not an OS sandbox", style="Muted.TLabel").pack(anchor="w", pady=8)
         submit_button.configure(state="normal")
         self._refresh_dev_cancel_button()
@@ -709,6 +904,26 @@ class ControlCenterApp:
         widget.delete("1.0", "end")
         widget.insert("1.0", text)
         widget.configure(state="disabled")
+
+    def _render_dev_inspectables(self, job_id):
+        info = self._dev_jobs.get(job_id) or {}
+        events = info.get("events") or []
+        record = {**info, "job": info.get("job")}
+        bar = getattr(self, "_chat_inspect_bar", None)
+        if bar is None or not bar.winfo_exists():
+            return
+        for child in bar.winfo_children():
+            child.destroy()
+        self._chat_inspect_actions = []
+        options = (("Job", "job"), ("Model", "model"), ("Runtime", "runtime"), ("Queue", "queue"),
+                   ("Model calls", "model_calls"), ("Tool calls", "tool_calls"),
+                   ("Tests", "tests"), ("Failure", "failure"))
+        for label, kind in options:
+            button = ttk.Button(bar, text=f"Inspect {label}", command=lambda k=kind, i=info, e=events, j=job_id:
+                                self._show_inspector(inspector_payload(k, j, i, e)))
+            button.pack(side="left", padx=3, pady=3)
+            self._chat_inspect_actions.append(button)
+        self._show_inspector(inspector_payload("job", job_id, record, events))
 
     def _submit_dev_job(self):
         text = self._chat_objective.get("1.0", "end").strip()
@@ -792,6 +1007,7 @@ class ControlCenterApp:
         info = self._dev_jobs.get(selected) if selected else None
         if info:
             self._render_dev_job(info.get("text", f"JOB: {selected}\nSTATUS: {self._unknown()}"))
+            self._render_dev_inspectables(selected)
         elif not self._dev_jobs:
             self._render_dev_job(self._dev_last_display if hasattr(self, "_dev_last_display") else "Ready · Ollama 11434")
 
@@ -870,12 +1086,12 @@ class ControlCenterApp:
                 lines.extend(["", "RESULT", json.dumps(job.result, ensure_ascii=False, indent=2, default=str)])
             if job.failure is not None:
                 lines.extend(["", "FAILURE", json.dumps(job.failure, ensure_ascii=False, indent=2, default=str)])
-            self.root.after(0, lambda: self._dev_job_updated(job_id, job, telemetry, "\n".join(lines), terminal))
+            self.root.after(0, lambda: self._dev_job_updated(job_id, job, telemetry, "\n".join(lines), terminal, events))
         except Exception as exc:
             message = f"JOB: {job_id}\nPOLL ERROR: {type(exc).__name__}: {exc}\nPolling will retry."
             self.root.after(0, lambda msg=message: self._dev_job_updated(job_id, None, None, msg, False))
 
-    def _dev_job_updated(self, job_id, job, telemetry, text, terminal):
+    def _dev_job_updated(self, job_id, job, telemetry, text, terminal, events=None):
         self._dev_poll_inflight.discard(job_id)
         info = self._dev_jobs.setdefault(job_id, {})
         if job is not None:
@@ -883,12 +1099,15 @@ class ControlCenterApp:
             info["state"] = job.state.value
         if telemetry is not None:
             info["telemetry"] = telemetry
+        if events is not None:
+            info["events"] = events
         if job is not None and telemetry is not None:
             info["details_loaded"] = True
         info["text"] = text
         self._upsert_dev_job_row(job_id)
         if self._dev_selected_job_id == job_id:
             self._render_dev_job(text)
+            self._render_dev_inspectables(job_id)
             self._refresh_dev_cancel_button()
         if terminal:
             self._dev_job_started.pop(job_id, None)
@@ -927,6 +1146,8 @@ class ControlCenterApp:
         tree = self._tree(("name", "agent_id", "role", "model_target"), ("Name", "Agent ID", "Role", "Local model"))
         for a in self.agents:
             tree.insert("", "end", values=(a.get("name"), a.get("agent_id"), a.get("role"), a.get("model_target", {}).get("model_id", "")))
+        tree.bind("<<TreeviewSelect>>", lambda _e: self._inspect_selected_row(tree, "agent"))
+        tree.bind("<Double-1>", lambda _e: self._inspect_selected_row(tree, "agent"))
 
     def page_jobs(self):
         tree = self._tree(
@@ -960,15 +1181,31 @@ class ControlCenterApp:
                 "Unknown (not reported)", _known(j.get("priority")), "Unknown (not reported)",
                 elapsed_wall(j), _known(j.get("attempt_count")), _known(j.get("deadline_at")),
                 _known((j.get("failure") or {}).get("code"))))
-        tree.bind("<Double-1>", lambda _e: self.show_job_events(self._selected_job(tree)))
+        tree.bind("<<TreeviewSelect>>", lambda _e: self._inspect_control_job(self._selected_job(tree)))
+        tree.bind("<Double-1>", lambda _e: self._inspect_control_job(self._selected_job(tree)))
         scroll = ttk.Scrollbar(self.page, orient="horizontal", command=tree.xview)
         scroll.pack(fill="x")
         tree.configure(xscrollcommand=scroll.set)
         bar = ttk.Frame(self.page)
         bar.pack(fill="x", pady=8)
-        ttk.Button(bar, text="Details / events", command=lambda: self.show_job_events(self._selected_job(tree))).pack(side="left")
+        ttk.Button(bar, text="Inspect job / events", command=lambda: self._inspect_control_job(self._selected_job(tree))).pack(side="left")
         ttk.Button(bar, text="Cancel / stop selected", command=lambda: self.cancel_job(self._selected_job(tree))).pack(side="left", padx=8)
         ttk.Label(bar, text="Retry unavailable: Node 0 API has no retry operation.", style="Muted.TLabel").pack(side="left", padx=8)
+
+    def _inspect_control_job(self, job):
+        if not job:
+            return
+        def fetch():
+            return self._request("workload_events", job_id=job["job_id"])
+        def run():
+            try:
+                events = fetch()
+                payload = inspector_payload("job", job["job_id"], job, events)
+                self.root.after(0, lambda: self._show_inspector(payload))
+            except Exception as exc:
+                payload = inspector_payload("failure", job["job_id"], {"error": type(exc).__name__})
+                self.root.after(0, lambda: self._show_inspector(payload))
+        threading.Thread(target=run, daemon=True).start()
 
     def _selected_job(self, tree):
         sel = tree.selection()
@@ -1040,6 +1277,8 @@ class ControlCenterApp:
              "Max context (metadata)", "Runtime context (loaded)", "VRAM", "Size", "Slot state", "OpenCode configured context"))
         for row in rows:
             tree.insert("", "end", values=row)
+        tree.bind("<<TreeviewSelect>>", lambda _e: self._inspect_selected_row(tree, "model"))
+        tree.bind("<Double-1>", lambda _e: self._inspect_selected_row(tree, "model"))
         if not rows:
             ttk.Label(self.page, text="No model inventory reported. Development runtime status is on Settings.", style="Muted.TLabel").pack(anchor="w", pady=10)
 
@@ -1048,9 +1287,28 @@ class ControlCenterApp:
         tree = self._tree(("component", "fact", "value", "source"), ("Component", "Measurement", "Value", "Source"))
         for row in hardware_rows(snap, self.ollama):
             tree.insert("", "end", values=row)
+        tree.bind("<<TreeviewSelect>>", lambda _e: self._inspect_selected_row(tree, "hardware"))
+        tree.bind("<Double-1>", lambda _e: self._inspect_selected_row(tree, "hardware"))
         note = (f"Snapshot {snap.observed_at.isoformat()} · {snap.probe_version} · read-only · unknown facts are shown explicitly"
                 if snap else "Hardware snapshot unavailable · Development Ollama status is read-only")
         ttk.Label(self.page, text=note, style="Muted.TLabel").pack(anchor="w", pady=8)
+
+    def _inspect_selected_row(self, tree, kind):
+        selection = tree.selection()
+        if not selection:
+            return
+        values = tree.item(selection[0], "values")
+        if kind == "model":
+            record = {"availability": values[2], "residency": values[3], "quantization": values[4],
+                      "context": values[10], "parameters": values[8]}
+            self._show_inspector(inspector_payload("model", values[0], record))
+        elif kind == "agent":
+            record = {"state": values[2], "job_id": "Unknown (not reported)", "model": values[3]}
+            self._show_inspector(inspector_payload("agent", values[1], record))
+        else:
+            record = {"value": values[2], "source": values[3],
+                      "observed_at": self.snapshot.observed_at.isoformat() if self.snapshot else "Unknown (not reported)"}
+            self._show_inspector(inspector_payload("hardware", f"{values[0]} · {values[1]}", record))
 
     def page_logs(self):
         filter_row = ttk.Frame(self.page)

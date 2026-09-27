@@ -1,6 +1,8 @@
 import unittest
+import tkinter as tk
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from tkinter import ttk
 
 from dante.control_center_gui import (
     ControlCenterApp,
@@ -26,10 +28,66 @@ from dante.control_center_gui import (
     parse_ollama_ps,
     parse_ollama_tags,
     read_opencode_limits,
+    inspector_payload,
 )
 
 
 class ControlCenterGuiPresentationTests(unittest.TestCase):
+    def test_inspectable_click_opens_shared_detail_panel_and_related_navigation(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f'Tk display unavailable: {exc}')
+        root.withdraw()
+        app = object.__new__(ControlCenterApp)
+        app.root = root
+        app._inspector_object = None
+        app.inspector_body = ttk.Frame(root)
+        app.inspector_title = ttk.Label(root, text='INSPECTOR')
+        field = app._inspectable(root, 'Job', 'job-A', 'job', 'job-A', {'state': 'running'}, [])
+        field.event_generate('<Button-1>')
+        root.update()
+        self.assertEqual(app._inspector_object['kind'], 'job')
+        runtime = inspector_payload('runtime', 'http://127.0.0.1:11434')
+        app._show_inspector(runtime)
+        self.assertEqual(app._inspector_object['kind'], 'runtime')
+        self.assertIn('Unknown (not reported)', str(app._inspector_object['fields']))
+        root.destroy()
+
+    def test_job_inspector_keeps_missing_facts_unknown_and_links_related_entities(self):
+        detail = inspector_payload('job', 'job-A', {'state': 'queued'}, [])
+        facts = dict(detail['fields'])
+        self.assertEqual(facts['Queue position'], 'Unknown (not reported)')
+        self.assertEqual(facts['Slot released'], 'Unknown (not reported)')
+        self.assertEqual(facts['Input tokens'], 'Unknown (not reported)')
+        self.assertEqual(detail['related'][0], ('Model', 'model', 'dante-qwen-agent:latest'))
+
+    def test_model_call_and_tool_call_inspectors_are_separate(self):
+        events = [
+            {'event': 'model.completed', 'timestamp_utc': 't1', 'metadata': {'model_wall_s': .25, 'input_tokens': 7}},
+            {'event': 'tool.completed', 'timestamp_utc': 't2', 'metadata': {'tool_id': 'READ_FILE',
+             'normalized_arguments': '{"path":"README.md"}', 'result_summary': '{"error":"not_found"}',
+             'status': 'success', 'result_digest': 'abc'}},
+        ]
+        model = inspector_payload('model_calls', 'job-A', {}, events)
+        tool = inspector_payload('tool_calls', 'job-A', {}, events)
+        self.assertEqual(model['summary'], '1 calls')
+        self.assertEqual(model['sections'][0][1][1], ('Input tokens', 7))
+        self.assertEqual(tool['summary'], '1 calls')
+        self.assertIn('README.md', str(tool['sections']))
+        self.assertNotIn('READ_FILE', str(model['sections']))
+
+    def test_queue_failure_test_runtime_and_model_inspectors_are_read_only_facts(self):
+        details = inspector_payload('queue', 'job-A', {'telemetry': {'capacity': 1, 'position': 2}})
+        self.assertEqual(dict(details['fields'])['Capacity'], 1)
+        self.assertEqual(dict(details['fields'])['Slot owner'], 'Unknown (not reported)')
+        tests = inspector_payload('tests', 'job-A', {}, [])
+        self.assertEqual(dict(tests['fields'])['Tests'], 'NOT RUN · bounded RUN_TESTS available')
+        runtime = inspector_payload('runtime', 'http://127.0.0.1:11434')
+        self.assertEqual(dict(runtime['fields'])['Runtime state'], 'Unknown (not reported)')
+        failure = inspector_payload('failure', 'job-A', {}, [{'event': 'x', 'metadata': {'status': 'failed'}}])
+        self.assertIn('Diagnosis', dict(failure['fields']))
+
     def test_development_test_status_distinguishes_available_execution_and_result(self):
         self.assertEqual(development_test_status([]), "NOT RUN · bounded RUN_TESTS available")
         base = {"event": "tool.completed", "metadata": {"tool_id": "RUN_TESTS", "status": "success"}}

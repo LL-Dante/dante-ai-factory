@@ -118,14 +118,27 @@ class DevelopmentAgentLoop:
                     input_tokens = updated
                 else:
                     output_tokens = updated
+            calls = response.tool_calls
+            requested = []
+            for call in calls:
+                arguments = dict(call.arguments) if isinstance(call.arguments, dict) else {}
+                if call.name == 'WRITE_FILE' and isinstance(arguments.get('content'), str):
+                    content = arguments.pop('content').encode('utf-8')
+                    arguments['content_bytes'] = len(content)
+                    arguments['content_sha256'] = hashlib.sha256(content).hexdigest()
+                requested.append({'tool': str(call.name)[:80], 'arguments': arguments})
             emit('model.completed', model_wall_s=round(time.monotonic() - call_started, 3),
-                 input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens)
+                 input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens,
+                 cached_input_tokens=getattr(response.usage, 'cached_input_tokens', None),
+                 configured_context_tokens=getattr(getattr(self.model, 'local_metadata', None), 'context_tokens', None),
+                 context_remaining_tokens=None, tool_requested=[item['tool'] for item in requested],
+                 tool_arguments_summary=json.dumps(requested, ensure_ascii=False, sort_keys=True,
+                                                   separators=(',', ':'), default=str)[:2048])
             if cancellation.is_set():
                 return result('CANCELLED', 'Cancelled during model call')
             if time.monotonic() >= deadline:
                 return result('LIMIT_REACHED', 'Wall-time limit reached')
 
-            calls = response.tool_calls
             if not calls:
                 content = (response.content or '').strip()
                 if not content:
@@ -135,6 +148,7 @@ class DevelopmentAgentLoop:
             messages.append(response.assistant_message)
             agent_stuck = False
             for index, call in enumerate(calls):
+                tool_started = time.monotonic()
                 if cancellation.is_set():
                     return result('CANCELLED', 'Cancelled before tool call')
                 if time.monotonic() >= deadline or tool_calls >= self.max_tool_calls:
@@ -142,7 +156,8 @@ class DevelopmentAgentLoop:
                 if agent_stuck:
                     outcome = ToolResult(status=ToolStatus.POLICY_DENIED, error_type='AGENT_STUCK')
                     tool_calls += 1
-                    emit('tool.completed', **self._tool_event_metadata(call, outcome))
+                    emit('tool.completed', tool_wall_s=round(time.monotonic() - tool_started, 3),
+                         **self._tool_event_metadata(call, outcome))
                     messages.append(ToolMessage(call_id=call.call_id,
                         content=self._stuck_tool_message()))
                     continue
@@ -201,6 +216,7 @@ class DevelopmentAgentLoop:
                     passed = outcome.data.get('tests_passed')
                     if type(passed) is bool:
                         event_metadata['tests_passed'] = passed
+                event_metadata['tool_wall_s'] = round(time.monotonic() - tool_started, 3)
                 emit('tool.completed', **event_metadata)
                 messages.append(ToolMessage(call_id=call.call_id,
                     content=tool_content or self._tool_message(outcome)))

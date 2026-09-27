@@ -117,7 +117,7 @@ class ToolBroker:
             elif manifest.filesystem_scope != 'none' or manifest.path_permissions:
                 raise ValueError('Undeclared filesystem scope')
         except (ValueError, OSError, RuntimeError):
-            return ToolResult(status=ToolStatus.POLICY_DENIED)
+            return ToolResult(status=ToolStatus.POLICY_DENIED, error_type='WorkspacePathDenied')
         return None
 
     def action_hash(self, task: Task, tool_id: str, arguments: dict, plan_hash: str = '') -> str:

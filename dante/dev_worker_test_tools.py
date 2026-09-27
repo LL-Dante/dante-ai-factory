@@ -97,6 +97,8 @@ def _run_tests(root: Path, target: str) -> dict:
             'target': normalized, 'return_code': process.returncode,
             'timed_out': timed_out, 'output_truncated': overflow.is_set(),
             'duration_s': round(time.monotonic() - started, 3), 'output': text,
+            'project_root': str(project_root),
+            'command_summary': 'Python -I subprocess; stdlib unittest selected-file runner',
             'isolation': 'bounded subprocess; current-user permissions; not an OS sandbox'}
 
 

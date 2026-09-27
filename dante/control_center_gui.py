@@ -446,7 +446,13 @@ def inspector_payload(kind, key, record=None, events=()):
     if kind == "job":
         metrics = development_job_metrics(events)
         telemetry = record.get("telemetry") if isinstance(record.get("telemetry"), dict) else {}
-        job = record.get("job") if isinstance(record.get("job"), dict) else record
+        candidate = record.get("job")
+        if isinstance(candidate, dict):
+            job = candidate
+        elif callable(getattr(candidate, "model_dump", None)):
+            job = candidate.model_dump(mode="json")
+        else:
+            job = record
         fields = [
             ("Job ID", key), ("State", record.get("state") or job.get("state") or "Unknown (not reported)"),
             ("Created / queued", (job.get("created_at") if isinstance(job, dict) else None) or telemetry.get("queued_at") or "Unknown (not reported)"),
@@ -518,9 +524,15 @@ def inspector_payload(kind, key, record=None, events=()):
                 ("Slot owner", "slot_owner_job_id"), ("Slot acquired", "slot_acquired_at"),
                 ("Slot released", "slot_released_at"), ("Release reason", "slot_released_reason"))]
         elif kind == "model":
-            fields = [("Model", key), ("Runtime reference", key), ("Configured context", record.get("context", "Unknown (not reported)")),
-                      ("Parameter count", record.get("parameters", "Unknown (not reported)")),
-                      ("Quantization", record.get("quantization", "Unknown (not reported)"))]
+            fields = [("Model", key), ("Runtime reference", key),
+                      ("Availability", record.get("availability", "Unknown (not reported)")),
+                      ("Residency", record.get("residency", "Unknown (not reported)")),
+                      ("Configured context", record.get("context", "Unknown (not reported)")),
+                      ("Runtime context", record.get("runtime_context", "Unknown (not reported)")),
+                      ("Maximum context metadata", record.get("max_context", "Unknown (not reported)")),
+                      ("Parameter count", "Unknown (not reported)"),
+                      ("Quantization", record.get("quantization", "Unknown (not reported)")),
+                      ("Size", record.get("size", "Unknown (not reported)"))]
         elif kind == "runtime":
             fields = [("Endpoint", key), ("Runtime state", record.get("state", "Unknown (not reported)")),
                       ("Slot owner", telemetry.get("slot_owner_job_id", "Unknown (not reported)")),
@@ -535,7 +547,25 @@ def inspector_payload(kind, key, record=None, events=()):
                       ("Observed at", record.get("observed_at", "Unknown (not reported)"))]
         elif kind == "tests":
             selected = [(event, meta) for event, meta in zip(events, metadata) if event.get("event") == "tool.completed" and meta.get("tool_id") == "RUN_TESTS"]
-            fields = [(f"Test run {n}", meta.get("result_summary", "Unknown (not reported)")) for n, (_event, meta) in enumerate(selected, 1)] or [("Tests", development_test_status(events))]
+            fields = []
+            for n, (event, meta) in enumerate(selected, 1):
+                try:
+                    summary = json.loads(meta.get("result_summary", "{}"))
+                except (TypeError, ValueError):
+                    summary = {}
+                fields.extend(((f"Test run {n} target", summary.get("target", "Unknown (not reported)")),
+                               (f"Test run {n} project root", summary.get("project_root", "Unknown (not reported)")),
+                               (f"Test run {n} command", summary.get("command_summary", "Unknown (not reported)")),
+                               (f"Test run {n} started/completed", event.get("timestamp_utc", "Unknown (not reported)")),
+                               (f"Test run {n} duration", summary.get("duration_s", "Unknown (not reported)")),
+                               (f"Test run {n} exit code", summary.get("return_code", "Unknown (not reported)")),
+                               (f"Test run {n} passed", summary.get("tests_passed", "Unknown (not reported)")),
+                               (f"Test run {n} result", summary.get("test_result_summary", "Unknown (not reported)")),
+                               (f"Test run {n} failed cases", summary.get("failed_tests", [])),
+                               (f"Test run {n} output", f"Summary only · raw output not persisted · {summary.get('output_bytes', 'Unknown')} bytes · sha256 {summary.get('output_sha256', 'Unknown (not reported)')}")))
+            if not fields:
+                fields = [("Tests", development_test_status(events)), ("Project root", "Unknown (not reported)"),
+                          ("Command", "Unknown (not reported)"), ("Bounded output", "No RUN_TESTS output persisted")]
         else:
             selected = []
             for event, meta in zip(events, metadata):
@@ -1319,7 +1349,8 @@ class ControlCenterApp:
         values = tree.item(selection[0], "values")
         if kind == "model":
             record = {"availability": values[2], "residency": values[3], "quantization": values[4],
-                      "context": values[10], "parameters": values[8]}
+                      "max_context": values[5], "runtime_context": values[6],
+                      "size": values[8], "context": values[10]}
             self._show_inspector(inspector_payload("model", values[0], record))
         elif kind == "agent":
             record = {"state": values[2], "job_id": "Unknown (not reported)", "model": values[3]}

@@ -266,10 +266,13 @@ class DevelopmentAgentLoop:
         raw = json.dumps(data, ensure_ascii=False, sort_keys=True,
                          separators=(',', ':'), default=str).encode('utf-8')
         safe = {'status': outcome.status.value, 'error_type': outcome.error_type}
-        for field in ('ok', 'path', 'target', 'tests_passed', 'return_code', 'timed_out',
+        for field in ('ok', 'path', 'target', 'project_root', 'command_summary', 'isolation',
+                      'tests_passed', 'return_code', 'timed_out',
                       'output_truncated', 'duration_s', 'bytes_written', 'truncated'):
             if field in data and isinstance(data[field], (bool, int, float, str, type(None))):
                 safe[field] = data[field][:256] if isinstance(data[field], str) else data[field]
+        if isinstance(data.get('output'), str) and 'tests_passed' in data:
+            safe.update(DevelopmentAgentLoop._test_output_summary(data['output']))
         for field in ('content', 'output'):
             value = data.get(field)
             if isinstance(value, str):
@@ -293,26 +296,30 @@ class DevelopmentAgentLoop:
                            separators=(',', ':'), default=str), digest)
 
     @staticmethod
+    def _test_output_summary(output: str) -> dict:
+        failed_tests = []
+        ran_summary = None
+        final_summary = None
+        for line in output.splitlines():
+            if line.startswith(('FAIL: ', 'ERROR: ')):
+                match = re.search(r'\b(test_[A-Za-z0-9_]+)\b', line)
+                if match and match.group(1) not in failed_tests:
+                    failed_tests.append(match.group(1))
+            if re.fullmatch(r'Ran \d+ tests? in [0-9.]+s', line.strip()):
+                ran_summary = line.strip()
+            if line.strip() == 'OK' or line.strip().startswith('FAILED ('):
+                final_summary = line.strip()
+        return {'failed_tests': failed_tests, 'test_summary': ran_summary,
+                'test_result_summary': final_summary}
+
+    @staticmethod
     def _tool_message(outcome: ToolResult) -> str:
         data = outcome.data if isinstance(outcome.data, dict) else {}
         if 'tests_passed' in data and isinstance(data.get('output'), str):
-            output = data['output']
-            failed_tests = []
-            ran_summary = None
-            final_summary = None
-            for line in output.splitlines():
-                if line.startswith(('FAIL: ', 'ERROR: ')):
-                    match = re.search(r'\b(test_[A-Za-z0-9_]+)\b', line)
-                    if match and match.group(1) not in failed_tests:
-                        failed_tests.append(match.group(1))
-                if re.fullmatch(r'Ran \d+ tests? in [0-9.]+s', line.strip()):
-                    ran_summary = line.strip()
-                if line.strip() == 'OK' or line.strip().startswith('FAILED ('):
-                    final_summary = line.strip()
             compact = {'target': data.get('target'), 'tests_passed': data.get('tests_passed'),
                        'return_code': data.get('return_code'), 'timed_out': data.get('timed_out'),
-                       'output_truncated': data.get('output_truncated'), 'failed_tests': failed_tests,
-                       'test_summary': ran_summary, 'result_summary': final_summary}
+                       'output_truncated': data.get('output_truncated'),
+                       **DevelopmentAgentLoop._test_output_summary(data['output'])}
             return json.dumps({'status': outcome.status.value, 'error_type': outcome.error_type,
                 'effect_uncertain': outcome.effect_uncertain, 'data': compact},
                 ensure_ascii=False, separators=(',', ':'), default=str)[:_MAX_TOOL_MESSAGE_CHARS]

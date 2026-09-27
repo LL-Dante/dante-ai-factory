@@ -32,6 +32,8 @@ class DevelopmentTestToolTests(unittest.TestCase):
         self.assertTrue(result.data['tests_passed'])
         self.assertIn('Ran 1 test', result.data['output'])
         self.assertIn('not an OS sandbox', result.data['isolation'])
+        self.assertEqual(result.data['project_root'], str(self.root))
+        self.assertIn('stdlib unittest', result.data['command_summary'])
 
     def test_failing_tests_return_assertion_output_as_successful_execution(self):
         (self.root / 'tests' / 'test_failure.py').write_text(

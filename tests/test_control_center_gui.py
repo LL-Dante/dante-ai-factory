@@ -1,5 +1,6 @@
 import unittest
 import tkinter as tk
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from tkinter import ttk
@@ -68,6 +69,37 @@ class ControlCenterGuiPresentationTests(unittest.TestCase):
         self.assertEqual(facts['Slot released'], 'Unknown (not reported)')
         self.assertEqual(facts['Input tokens'], 'Unknown (not reported)')
         self.assertEqual(detail['related'][0], ('Model', 'model', 'dante-qwen-agent:latest'))
+
+    def test_typed_worker_job_preserves_real_timestamps_and_result(self):
+        typed_job = SimpleNamespace(model_dump=lambda **_kwargs: {
+            'state': 'succeeded', 'created_at': 'created', 'updated_at': 'ended',
+            'result': {'text': 'verified'}, 'failure': None,
+        })
+        detail = inspector_payload('job', 'job-A', {'job': typed_job, 'telemetry': {}, 'state': 'succeeded'}, [])
+        facts = dict(detail['fields'])
+        self.assertEqual(facts['Created / queued'], 'created')
+        self.assertEqual(facts['Ended'], 'ended')
+        self.assertIn('verified', facts['Result'])
+
+    def test_model_and_test_inspectors_report_only_available_facts(self):
+        model = inspector_payload('model', 'dante-qwen-agent:latest', {
+            'size': '18 GiB', 'context': '8192', 'quantization': 'Q3_K_M',
+        })
+        facts = dict(model['fields'])
+        self.assertEqual(facts['Size'], '18 GiB')
+        self.assertEqual(facts['Parameter count'], 'Unknown (not reported)')
+        events = [{'event': 'tool.completed', 'timestamp_utc': 't1', 'metadata': {
+            'tool_id': 'RUN_TESTS', 'result_summary': json.dumps({
+                'target': 'tests/test_x.py', 'project_root': 'workspace/project',
+                'command_summary': 'Python -I subprocess', 'duration_s': 0.25,
+                'return_code': 1, 'tests_passed': False, 'test_result_summary': 'FAILED (failures=1)',
+                'failed_tests': ['test_expected'], 'output_bytes': 100, 'output_sha256': 'abc',
+            })}}]
+        tests = inspector_payload('tests', 'job-A', {}, events)
+        facts = dict(tests['fields'])
+        self.assertEqual(facts['Test run 1 project root'], 'workspace/project')
+        self.assertEqual(facts['Test run 1 failed cases'], ['test_expected'])
+        self.assertIn('raw output not persisted', facts['Test run 1 output'])
 
     def test_model_call_and_tool_call_inspectors_are_separate(self):
         events = [

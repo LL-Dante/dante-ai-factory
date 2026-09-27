@@ -5,6 +5,7 @@ from dante.contracts import Task
 from dante.tool_broker import ToolBroker
 from dante.contracts.tools import ToolStatus
 from dante.dev_worker_tools import register_coding_tools
+from dante.dev_agent_loop import DevelopmentAgentLoop
 
 
 class TestDevWorkerTools(unittest.TestCase):
@@ -56,6 +57,8 @@ class TestDevWorkerTools(unittest.TestCase):
             'error': {'code': 'not_found', 'message': 'No file exists at this workspace path.'},
         })
         self.assertFalse(result.effect_uncertain)
+        summary, _digest = DevelopmentAgentLoop._tool_result_summary(result)
+        self.assertIn('not_found', summary)
 
     def test_directory_is_structured_read_error(self):
         (self.root / 'folder').mkdir()

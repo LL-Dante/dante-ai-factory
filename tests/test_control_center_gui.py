@@ -48,10 +48,17 @@ class ControlCenterGuiPresentationTests(unittest.TestCase):
         field.event_generate('<Button-1>')
         root.update()
         self.assertEqual(app._inspector_object['kind'], 'job')
-        runtime = inspector_payload('runtime', 'http://127.0.0.1:11434')
-        app._show_inspector(runtime)
+        app._show_inspector(inspector_payload('job', 'job-A', {'state': 'running'}, []))
+        buttons = [child for child in app.inspector_body.winfo_children() if isinstance(child, ttk.Button)]
+        model_button = next(button for button in buttons if button.cget('text').startswith('Inspect Model'))
+        model_button.invoke()
+        self.assertEqual(app._inspector_object['kind'], 'model')
+        buttons = [child for child in app.inspector_body.winfo_children() if isinstance(child, ttk.Button)]
+        runtime_button = next(button for button in buttons if button.cget('text').startswith('Inspect Runtime'))
+        runtime_button.invoke()
+        runtime = app._inspector_object
         self.assertEqual(app._inspector_object['kind'], 'runtime')
-        self.assertIn('Unknown (not reported)', str(app._inspector_object['fields']))
+        self.assertIn('Unknown (not reported)', str(runtime['fields']))
         root.destroy()
 
     def test_job_inspector_keeps_missing_facts_unknown_and_links_related_entities(self):
@@ -85,8 +92,11 @@ class ControlCenterGuiPresentationTests(unittest.TestCase):
         self.assertEqual(dict(tests['fields'])['Tests'], 'NOT RUN · bounded RUN_TESTS available')
         runtime = inspector_payload('runtime', 'http://127.0.0.1:11434')
         self.assertEqual(dict(runtime['fields'])['Runtime state'], 'Unknown (not reported)')
-        failure = inspector_payload('failure', 'job-A', {}, [{'event': 'x', 'metadata': {'status': 'failed'}}])
-        self.assertIn('Diagnosis', dict(failure['fields']))
+        failure = inspector_payload('failure', 'job-A', {}, [{'event': 'tool.completed', 'timestamp_utc': 't1',
+            'metadata': {'tool_id': 'READ_FILE', 'status': 'success',
+                         'result_summary': '{"tool_error_code":"not_found"}'}}])
+        self.assertEqual(dict(failure['fields'])['Diagnosis'],
+                         'Known: READ_FILE target did not exist in the worker workspace.')
 
     def test_development_test_status_distinguishes_available_execution_and_result(self):
         self.assertEqual(development_test_status([]), "NOT RUN · bounded RUN_TESTS available")

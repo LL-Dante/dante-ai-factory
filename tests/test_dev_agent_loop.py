@@ -142,6 +142,28 @@ class DevelopmentAgentLoopTests(unittest.TestCase):
         self.assertLessEqual(len(message), 1000)
         self.assertTrue(json.loads(message)['truncated'])
 
+    def test_test_failure_feedback_names_failing_cases_without_raw_output(self):
+        outcome = ToolResult(status=ToolStatus.SUCCESS, data={
+            'ok': True, 'target': 'tests/test_report_cache.py', 'tests_passed': False,
+            'return_code': 1, 'timed_out': False, 'output_truncated': False,
+            'output': ('FAIL: test_suffix_is_case_insensitive (ReportCacheTests)\n'
+                       'AssertionError: expected-private-value\n'
+                       'Ran 4 tests in 0.2s\nFAILED (failures=1)')})
+        message = DevelopmentAgentLoop._tool_message(outcome)
+        self.assertLessEqual(len(message), 1000)
+        data = json.loads(message)['data']
+        self.assertEqual(data['failed_tests'], ['test_suffix_is_case_insensitive'])
+        self.assertEqual(data['test_summary'], 'Ran 4 tests in 0.2s')
+        self.assertNotIn('expected-private-value', message)
+
+    def test_system_prompt_tells_worker_to_stop_exploring_after_baseline_failure(self):
+        adapter = FakeAdapter([response('done')])
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model, ('READ_FILE',))
+        loop.run('bounded task', Event())
+        prompt = adapter.requests[0].messages[0].content
+        self.assertIn('do not search or reread unchanged files', prompt)
+        self.assertIn('post-edit test run', prompt)
+
     def test_unknown_usage_stays_unknown(self):
         adapter = FakeAdapter([response('done', input_tokens=None, output_tokens=None)])
         loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model, ('READ_FILE',))

@@ -537,15 +537,34 @@ def inspector_payload(kind, key, record=None, events=()):
             selected = [(event, meta) for event, meta in zip(events, metadata) if event.get("event") == "tool.completed" and meta.get("tool_id") == "RUN_TESTS"]
             fields = [(f"Test run {n}", meta.get("result_summary", "Unknown (not reported)")) for n, (_event, meta) in enumerate(selected, 1)] or [("Tests", development_test_status(events))]
         else:
-            selected = [(event, meta) for event, meta in zip(events, metadata)
-                        if meta.get("status") not in {None, "success"} or meta.get("error_type")]
-            fields = [("Fact", "Failure data shown from persisted events only"),
-                      ("Error events", len(selected)),
-                      ("Diagnosis", "Known: workspace read errors now return structured results; no inference diagnosis generated.")]
+            selected = []
+            for event, meta in zip(events, metadata):
+                try:
+                    result = json.loads(meta.get("result_summary", "{}"))
+                except (TypeError, ValueError):
+                    result = {}
+                code = result.get("tool_error_code") if isinstance(result, dict) else None
+                if meta.get("status") not in {None, "success"} or meta.get("error_type") or code:
+                    selected.append((event, meta, code))
+            fields = [("FACT", f"{meta.get('tool_id', 'Unknown tool')} · {meta.get('status', 'Unknown status')} · {event.get('timestamp_utc', 'Unknown (not reported)')}")
+                      for event, meta, _code in selected]
+            fields.extend(("ERROR DATA", meta.get("error_type") or code or "Unknown (not reported)")
+                          for _event, meta, code in selected)
+            known_codes = {code for _event, _meta, code in selected if code}
+            if "not_found" in known_codes:
+                diagnosis = "Known: READ_FILE target did not exist in the worker workspace."
+            elif "not_a_file" in known_codes:
+                diagnosis = "Known: READ_FILE target resolved to a directory."
+            elif known_codes & {"invalid_encoding", "too_large", "blocked_path", "read_failed"}:
+                diagnosis = "Known: READ_FILE returned a safe structured error; see the tool code above."
+            else:
+                diagnosis = "Unknown (no deterministic diagnosis established by persisted events)."
+            fields.extend((("Diagnosis", diagnosis), ("Evidence", "Persisted job events only; no LLM-generated diagnosis.")))
         timeline = events[-40:] if kind in {"queue", "failure", "tests"} else []
+        related = [("Runtime", "runtime", OLLAMA_ENDPOINT)] if kind == "model" else []
         return {"kind": kind, "key": key, "title": f"{kind.replace('_', ' ').title()} · {key}",
                 "summary": f"{len(fields)} factual details", "fields": fields,
-                "events": timeline, "related": []}
+                "events": timeline, "related": related}
     return {"kind": kind, "key": key, "title": str(kind).title(), "summary": "Unknown (not reported)",
             "fields": [("Value", str(key))], "events": [], "related": []}
 

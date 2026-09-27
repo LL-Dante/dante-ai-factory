@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import threading
 import time
 import urllib.request
@@ -28,6 +29,33 @@ STATES = {
     "timed_out": ("TIMEOUT", "#e05d65"),
 }
 OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
+OPENCODE_CONFIG = Path(__file__).resolve().parent.parent / "opencode.json"
+
+
+def read_opencode_limits(config=None):
+    """Return only supported local Qwen limits and timeouts; never expose URLs."""
+    if config is None:
+        try:
+            config = json.loads(OPENCODE_CONFIG.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            config = {}
+    providers = config.get("provider", {}) if isinstance(config, dict) else {}
+    provider = providers.get("ollama", {}) if isinstance(providers, dict) else {}
+    options = provider.get("options", {}) if isinstance(provider, dict) else {}
+    models = provider.get("models", {}) if isinstance(provider, dict) else {}
+    model = models.get("dante-qwen-agent:latest", {}) if isinstance(models, dict) else {}
+    limits = model.get("limit", {}) if isinstance(model, dict) else {}
+
+    def numeric(container, key):
+        value = container.get(key) if isinstance(container, dict) else None
+        return str(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < float("inf") else "Unknown"
+
+    return {
+        "timeout": numeric(options, "timeout"),
+        "header_timeout": numeric(options, "headerTimeout"),
+        "context": numeric(limits, "context"),
+        "output": numeric(limits, "output"),
+    }
 
 
 def format_bytes(value, unit="GiB"):
@@ -708,12 +736,28 @@ class ControlCenterApp:
 
     def page_settings(self):
         state = self.ollama
+        limits = read_opencode_limits()
         row = ttk.Frame(self.page)
         row.pack(fill="x", pady=(0, 12))
         online = state.get("online")
         self._panel(row, "Development Ollama", "ONLINE" if online else "OFFLINE", f"Get-only checks of {state.get('endpoint', OLLAMA_ENDPOINT)}").pack(side="left", fill="x", expand=True, padx=(0, 9))
         self._panel(row, "Endpoint", state.get("endpoint", OLLAMA_ENDPOINT), "Local development runtime only. No cloud fallback.").pack(side="left", fill="x", expand=True, padx=(0, 9))
         self._panel(row, "Policy", "LOCAL ONLY", "Provider and endpoint are fixed. No cloud fallback, no load/unload actions. Read-only status: GET /api/tags and /api/ps only.").pack(side="left", fill="x", expand=True)
+
+        ttk.Label(self.page, text="EXECUTION POLICY", style="PanelTitle.TLabel").pack(anchor="w", pady=(8, 7))
+        policy_facts = (
+            ("Local first", "ON", "Development worker only"),
+            ("Cloud fallback", "OFF", "No remote inference fallback"),
+            ("Production Node0", "127.0.0.1:11435", "Protected; no GUI requests or controls"),
+            ("Qwen heavy slots", "1", "Single local inference at a time"),
+            ("OpenCode timeout", f"{limits['timeout']} ms", f"Header timeout: {limits['header_timeout']} ms"),
+            ("Qwen configured limits", f"{limits['context']} context", f"Output: {limits['output']} tokens"),
+        )
+        for offset in (0, 3):
+            policy = ttk.Frame(self.page)
+            policy.pack(fill="x", pady=(0, 8))
+            for title, value, detail in policy_facts[offset:offset + 3]:
+                self._panel(policy, title, value, detail).pack(side="left", fill="x", expand=True, padx=(0, 8))
 
         ttk.Label(self.page, text="INSTALLED MODELS", style="PanelTitle.TLabel").pack(anchor="w", pady=(8, 7))
         installed = self._tree(("name", "size"), ("Model", "Size"))

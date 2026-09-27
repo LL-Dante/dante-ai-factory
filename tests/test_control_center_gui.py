@@ -19,10 +19,34 @@ from dante.control_center_gui import (
     job_submission_text,
     parse_ollama_ps,
     parse_ollama_tags,
+    read_opencode_limits,
 )
 
 
 class ControlCenterGuiPresentationTests(unittest.TestCase):
+    def test_opencode_settings_expose_only_numeric_local_limits(self):
+        config = {
+            "provider": {"ollama": {
+                "options": {"baseURL": "http://secret.invalid", "timeout": 600000, "headerTimeout": 500000},
+                "models": {"dante-qwen-agent:latest": {"limit": {"context": 65536, "output": 4096}}},
+            }}
+        }
+        facts = read_opencode_limits(config)
+        self.assertEqual(facts, {
+            "timeout": "600000", "header_timeout": "500000", "context": "65536", "output": "4096",
+        })
+        self.assertNotIn("baseURL", facts)
+        self.assertNotIn("secret.invalid", str(facts))
+
+    def test_missing_or_invalid_opencode_limits_are_explicitly_unknown(self):
+        config = {"provider": {"ollama": {
+            "options": {"timeout": True, "headerTimeout": "600000"},
+            "models": {"dante-qwen-agent:latest": {"limit": {"context": 0}}},
+        }}}
+        self.assertEqual(read_opencode_limits(config), {
+            "timeout": "Unknown", "header_timeout": "Unknown", "context": "Unknown", "output": "Unknown",
+        })
+
     def test_job_states_remain_visibly_distinct(self):
         labels = {state: job_label({"state": state})[0] for state in (
             "queued", "claimed", "running", "retry_wait", "timed_out", "failed", "cancelled", "succeeded")}

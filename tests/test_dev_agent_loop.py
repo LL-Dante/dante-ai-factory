@@ -11,7 +11,7 @@ from dante.contracts.inference import AssistantMessage, ToolCall, Usage
 from dante.contracts.runtime import LocalModelMetadata
 from dante.contracts.tools import ToolResult, ToolStatus
 from dante.dev_agent_loop import DevelopmentAgentLoop
-from dante.inference import InferenceCancelled
+from dante.inference import InferenceCancelled, AdapterUnavailable
 
 
 def model():
@@ -39,6 +39,13 @@ class FakeAdapter:
         if cancellation.is_set():
             raise InferenceCancelled()
         return self.replies.pop(0)
+
+
+class FailingAdapter(FakeAdapter):
+    def complete_cancellable(self, request, cancellation):
+        raise AdapterUnavailable('safe failure', diagnostic={'endpoint': '127.0.0.1:11434',
+            'http_status': 500, 'request_ended_at': '2026-09-27T20:23:07Z', 'duration_s': 20.094,
+            'safe_error_body': {'safe_markers': ['unexpected end of json input']}})
 
 
 class FakeBroker:
@@ -99,6 +106,34 @@ class DevelopmentAgentLoopTests(unittest.TestCase):
         tool_message = json.loads(adapter.requests[1].messages[-1].content)
         self.assertEqual(tool_message['status'], 'policy_denied')
 
+    def test_model_failure_emits_safe_durable_event_and_stops(self):
+        events = []
+        loop = DevelopmentAgentLoop(FailingAdapter([]), self.broker, self.task, self.model,
+            ('READ_FILE',), emit=lambda name, **data: events.append((name, data)))
+        result = loop.run('bounded task', Event())
+        self.assertEqual(result.status, 'FAILED')
+        name, event = events[0]
+        self.assertEqual(name, 'model.failed')
+        self.assertEqual(event['call_sequence'], 1)
+        self.assertEqual(event['http_status'], 500)
+        self.assertNotIn('prompt', json.dumps(event))
+        self.assertNotIn('response', json.dumps(event))
+
+    def test_coding_budget_reserves_baseline_edit_and_verification(self):
+        reads = [ToolCall(call_id=f'r{i}', name='READ_FILE', arguments={'path': f'f{i}'}) for i in range(1, 5)]
+        baseline = ToolCall(call_id='base', name='RUN_TESTS', arguments={})
+        edit = ToolCall(call_id='edit', name='PATCH_FILE', arguments={'path':'f1','expected':'x','replacement':'y'})
+        verify = ToolCall(call_id='verify', name='RUN_TESTS', arguments={})
+        replies = [*(response(calls=(call,)) for call in reads), response(calls=(baseline,)),
+                   response(calls=(edit,)), response(calls=(verify,)), response('complete')]
+        adapter = FakeAdapter(replies)
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model,
+            ('READ_FILE', 'RUN_TESTS', 'PATCH_FILE'))
+        result = loop.run('inspect edit verify', Event())
+        self.assertEqual(result.status, 'DONE')
+        self.assertLessEqual(result.tool_calls, 8)
+        self.assertIn('RUN_TESTS', [name for _, name, _, _ in self.broker.calls])
+
     def test_step_cap_is_explicit(self):
         call = ToolCall(call_id='c1', name='READ_FILE', arguments={'path': 'a.txt'})
         adapter = FakeAdapter([response(calls=(call,))])
@@ -142,6 +177,19 @@ class DevelopmentAgentLoopTests(unittest.TestCase):
         self.assertLessEqual(len(message), 1000)
         self.assertTrue(json.loads(message)['truncated'])
 
+    def test_range_tool_message_preserves_numbered_content_and_valid_json(self):
+        outcome = ToolResult(status=ToolStatus.SUCCESS, data={'ok': True, 'path': 'a.py',
+            'start_line': 8, 'end_line': 8, 'total_lines': 20, 'returned_lines': 1,
+            'truncated': False, 'result_sha256': 'a' * 64,
+            'lines': [{'line': 8, 'text': 'x' * 2000}]})
+        message = DevelopmentAgentLoop._tool_message(outcome)
+        parsed = json.loads(message)
+        self.assertLessEqual(len(message), 1000)
+        self.assertEqual(parsed['data']['start_line'], 8)
+        self.assertEqual(parsed['data']['lines'][0]['line'], 8)
+        self.assertEqual(len(parsed['data']['lines'][0]['text']), 400)
+        self.assertTrue(parsed['data']['truncated'])
+
     def test_test_failure_feedback_names_failing_cases_without_raw_output(self):
         outcome = ToolResult(status=ToolStatus.SUCCESS, data={
             'ok': True, 'target': 'tests/test_report_cache.py', 'tests_passed': False,
@@ -163,6 +211,16 @@ class DevelopmentAgentLoopTests(unittest.TestCase):
         prompt = adapter.requests[0].messages[0].content
         self.assertIn('do not search or reread unchanged files', prompt)
         self.assertIn('post-edit test run', prompt)
+
+    def test_tool_definitions_explain_targeted_read_and_patch(self):
+        adapter = FakeAdapter([response('done')])
+        loop = DevelopmentAgentLoop(adapter, self.broker, self.task, self.model,
+            ('READ_FILE', 'READ_FILE_RANGE', 'PATCH_FILE'))
+        loop.run('inspect', Event())
+        definitions = {item.name: item.description for item in adapter.requests[0].tools}
+        self.assertIn('READ_FILE_RANGE', definitions['READ_FILE'])
+        self.assertIn('numbered lines', definitions['READ_FILE_RANGE'])
+        self.assertIn('exact expected text', definitions['PATCH_FILE'])
 
     def test_unknown_usage_stays_unknown(self):
         adapter = FakeAdapter([response('done', input_tokens=None, output_tokens=None)])

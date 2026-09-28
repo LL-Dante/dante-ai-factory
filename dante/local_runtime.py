@@ -1,6 +1,9 @@
 """Local HTTP runtime adapters. Wire formats never cross this boundary."""
 import json
 import re
+import time
+from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -24,6 +27,38 @@ class _RuntimePayload(dict):
 _SAFE_KEY = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,63}$')
 _SAFE_MODEL = re.compile(r'^[A-Za-z0-9._:/-]{1,128}$')
 _SAFE_MEDIA_TYPE = re.compile(r'^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$')
+
+
+def _safe_error_body(raw: bytes, maximum: int = 240) -> dict:
+    """Extract allow-listed runtime markers; arbitrary response text is never persisted."""
+    try:
+        value = _loads(raw)
+    except (ValueError, TypeError):
+        value = None
+    text = value.get('error', '') if isinstance(value, dict) else value if isinstance(value, str) else raw.decode('utf-8', errors='ignore')
+    folded = text.casefold() if isinstance(text, str) else ''
+    markers = ('invalid tool call arguments', 'unexpected end of json input', 'context_length_exceeded',
+               'context window', 'model not found', 'out of memory', 'busy', 'unavailable')
+    return {'bytes': len(raw), 'safe_markers': [marker for marker in markers if marker in folded][:4],
+            'truncated': len(raw) > maximum}
+
+
+def _request_failure_diagnostic(endpoint, method, path, started, monotonic_started,
+                                status, classification, content_type, raw_length, safe_body):
+    parsed = urlsplit(endpoint)
+    host = parsed.hostname or '<unknown>'
+    if parsed.port:
+        host += f':{parsed.port}'
+    media_type = (content_type or '').split(';', 1)[0].strip()
+    safe_content_type = (media_type if _SAFE_MEDIA_TYPE.fullmatch(media_type)
+                         else '<unrecognized>' if content_type else None)
+    return {'endpoint': host, 'method': method, 'path': path,
+            'request_started_at': started.isoformat(),
+            'request_ended_at': datetime.now(timezone.utc).isoformat(),
+            'duration_s': round(max(0.0, time.monotonic() - monotonic_started), 6),
+            'http_status': status, 'exception_classification': classification,
+            'http_content_type': safe_content_type, 'response_bytes': raw_length,
+            'safe_error_body': safe_body}
 
 
 def _json_type(value):
@@ -129,10 +164,15 @@ class LocalRuntimeAdapter:
         self.machine_profile, self.transport, self.registry = machine_profile, transport, registry
 
     def _json(self, path, body=None, *, allow_not_found=False, cancellation=None):
+        request_started = datetime.now(timezone.utc)
+        started_monotonic = time.monotonic()
+        method = 'GET' if body is None else 'POST'
+        status = content_type = None
+        raw_length = 0
         try:
             with httpx.Client(transport=self.transport, trust_env=False, follow_redirects=False,
                               timeout=self.profile.timeout_s) as client:
-                with client.stream('GET' if body is None else 'POST', self.profile.base_url + path,
+                with client.stream(method, self.profile.base_url + path,
                                    **({} if body is None else {'json': body})) as response:
                     raw = bytearray()
                     status = response.status_code
@@ -141,6 +181,7 @@ class LocalRuntimeAdapter:
                         if cancellation is not None and cancellation.is_set():
                             raise InferenceCancelled('Local inference cancelled')
                         raw.extend(chunk)
+                        raw_length = len(raw)
                         if len(raw) > self.profile.max_response_bytes:
                             diagnostic = _response_diagnostic(status, content_type, len(raw),
                                 validation_rule='response_size_limit', failed_field='response_bytes',
@@ -149,19 +190,32 @@ class LocalRuntimeAdapter:
                     if response.status_code == 404 and allow_not_found:
                         return None
                     if response.status_code != 200:
+                        safe_body = _safe_error_body(bytes(raw))
                         try:
                             self._error(response.status_code, bytes(raw), retry_after_seconds(response.headers.get('Retry-After')))
                         except InferenceError as exc:
                             exc.runtime_reachable = True
                             if isinstance(exc, InvalidResponse):
-                                exc.diagnostic = _response_diagnostic(status, content_type, len(raw),
+                                shape = _response_diagnostic(status, content_type, len(raw),
                                     validation_rule='http_status_rejected', failed_field='http_status',
                                     expected='200', actual=str(status))
+                            else:
+                                shape = {}
+                            shape.update(_request_failure_diagnostic(
+                                self.profile.base_url, method, path, request_started, started_monotonic,
+                                status, type(exc).__name__, content_type, len(raw), safe_body))
+                            exc.diagnostic = shape
                             raise
         except httpx.TimeoutException:
-            raise InferenceTimeout('Local runtime timed out') from None
+            exc = InferenceTimeout('Local runtime timed out')
+            exc.diagnostic = _request_failure_diagnostic(self.profile.base_url, method, path,
+                request_started, started_monotonic, status, 'timeout', content_type, raw_length, None)
+            raise exc from None
         except httpx.TransportError:
-            raise AdapterUnavailable('Local runtime unavailable') from None
+            exc = AdapterUnavailable('Local runtime unavailable')
+            exc.diagnostic = _request_failure_diagnostic(self.profile.base_url, method, path,
+                request_started, started_monotonic, status, 'transport', content_type, raw_length, None)
+            raise exc from None
         try:
             payload = _loads(bytes(raw))
         except (ValueError, TypeError):

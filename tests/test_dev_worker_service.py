@@ -1,4 +1,5 @@
 import tempfile
+import json
 import time
 import unittest
 from pathlib import Path
@@ -12,12 +13,14 @@ from dante.contracts import CostClass, ModelRef, PrivacyClass, Task, TaskStatus
 from dante.contracts.agents import AgentTaskPayload
 from dante.contracts.inference import AssistantMessage, ToolCall, Usage
 from dante.contracts.runtime import LocalModelMetadata
+from dante.inference import AdapterUnavailable
 from dante.dev_qwen_runtime import DevelopmentQwenAdapter
 from dante.dev_worker_service import (DevelopmentAgentStuck, DevelopmentWorkerService,
                                       _CodingAgent, discover_development_qwen)
 from dante.dev_worker_tools import register_coding_tools
 from dante.ledger import TaskLedger
 from dante.tool_broker import ToolBroker
+from dante.workload import JobState, TERMINAL_STATES
 
 
 def dev_model():
@@ -29,6 +32,42 @@ def dev_model():
 
 
 class DevelopmentWorkerServiceTests(unittest.TestCase):
+    def test_failed_model_call_is_persisted_as_safe_workload_event(self):
+        class FailedAdapter:
+            profile = SimpleNamespace(base_url='http://127.0.0.1:11434')
+            provider_id = 'dev-qwen'
+
+            def complete_cancellable(self, _request, _cancellation):
+                raise AdapterUnavailable('safe failure', diagnostic={
+                    'endpoint': '127.0.0.1:11434', 'http_status': 500,
+                    'request_ended_at': '2026-09-28T00:00:00+00:00', 'duration_s': 0.25,
+                    'safe_error_body': {'safe_markers': ['unexpected end of json input']}})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / 'workspace'
+            workspace.mkdir()
+            service = DevelopmentWorkerService(root / 'worker.db', FailedAdapter(), dev_model(), workspace)
+            try:
+                job = service.submit('inspect this disposable workspace')
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    record = service.get(str(job.job_id))
+                    if record.state in TERMINAL_STATES:
+                        break
+                    time.sleep(0.02)
+                self.assertEqual(record.state, JobState.FAILED)
+                event = next(item for item in service.events(str(job.job_id))
+                             if item['event'] == 'model.failed')
+                self.assertEqual(event['metadata']['call_sequence'], 1)
+                self.assertEqual(event['metadata']['http_status'], 500)
+                self.assertEqual(event['metadata']['duration_s'], 0.25)
+                self.assertEqual(event['metadata']['safe_summary'], ['unexpected end of json input'])
+                self.assertNotIn('prompt', json.dumps(event['metadata']))
+                self.assertNotIn('response', json.dumps(event['metadata']))
+            finally:
+                service.close()
+
     def test_coding_agent_completes_with_real_ledger_transition_api(self):
         class FakeAdapter:
             def __init__(self, replies):
@@ -138,7 +177,8 @@ class DevelopmentWorkerServiceTests(unittest.TestCase):
             try:
                 self.assertEqual(service.store.path, service.ledger.path)
                 self.assertEqual(service.tool_ids,
-                    ('READ_FILE', 'LIST_FILES', 'SEARCH_TEXT', 'WRITE_FILE', 'RUN_TESTS'))
+                    ('READ_FILE', 'LIST_FILES', 'SEARCH_TEXT', 'READ_FILE_RANGE',
+                     'PATCH_FILE', 'WRITE_FILE', 'RUN_TESTS'))
                 self.assertEqual(service.orchestrator.resource_gate.max_gpu_jobs, 1)
                 self.assertEqual(service.orchestrator.state, 'STOPPED')
             finally:

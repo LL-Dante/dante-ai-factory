@@ -287,11 +287,31 @@ class LocalAdapterTests(unittest.TestCase):
 
     def test_ollama_timeout(self):
         wire=Wire(); wire.error=httpx.ReadTimeout('fixture')
-        with self.assertRaises(InferenceTimeout): wire.adapter().complete(request())
+        with self.assertRaises(InferenceTimeout) as caught: wire.adapter().complete(request())
+        diag = caught.exception.diagnostic
+        self.assertEqual(diag['exception_classification'], 'timeout')
+        self.assertEqual(diag['path'], '/api/tags')
+        self.assertGreaterEqual(diag['duration_s'], 0)
 
     def test_ollama_unavailable(self):
         wire=Wire(); wire.error=httpx.ConnectError('fixture')
-        with self.assertRaises(AdapterUnavailable): wire.adapter().complete(request())
+        with self.assertRaises(AdapterUnavailable) as caught: wire.adapter().complete(request())
+        self.assertEqual(caught.exception.diagnostic['exception_classification'], 'transport')
+
+    def test_http_failure_diagnostic_preserves_status_and_redacts_body(self):
+        for status in (404, 500, 502, 503):
+            wire = Wire(raw_content=json.dumps({'error': 'invalid tool call arguments: unexpected end of JSON input; secret-token'}).encode())
+            wire.status = status
+            with self.subTest(status=status), self.assertRaises(AdapterUnavailable) as caught:
+                wire.adapter().complete(request())
+            diagnostic = caught.exception.diagnostic
+            self.assertEqual(diagnostic['http_status'], status)
+            self.assertEqual(diagnostic['endpoint'], '127.0.0.1:11434')
+            self.assertEqual(diagnostic['method'], 'POST')
+            self.assertEqual(diagnostic['path'], '/api/chat')
+            self.assertIn('unexpected end of json input', diagnostic['safe_error_body']['safe_markers'])
+            self.assertNotIn('secret-token', json.dumps(diagnostic))
+            self.assertLess(len(json.dumps(diagnostic)), 1000)
 
     def test_ollama_context_error(self):
         wire=Wire(payload={'error':'input exceeds the context window'}); wire.status=400
